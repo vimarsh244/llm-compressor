@@ -8,6 +8,7 @@ while maintaining hardware efficiency.
 
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from compressed_tensors.quantization import QuantizationScheme, QuantizationArgs
 
 from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization.apot import APoTQuantizationModifier
@@ -59,27 +60,33 @@ def tokenize(sample):
 
 print("Configuring APoT quantization...")
 
-# Configure APoT quantization
+# Configure APoT quantization using config_groups
 # This will quantize weights to 4-bit APoT with 2 terms and activations to 8-bit APoT
 apot_recipe = APoTQuantizationModifier(
-    targets=["Linear"],
+    config_groups={
+        "group_0": QuantizationScheme(
+            targets=["Linear"],
+            weights=QuantizationArgs(
+                num_bits=4,
+                type="int",
+                symmetric=True,
+                strategy="channel",  # per-channel quantization for better accuracy
+                observer="apot",
+                observer_kwargs={"num_terms": 2},
+            ),
+            input_activations=QuantizationArgs(
+                num_bits=8,
+                type="int",
+                symmetric=True,
+                strategy="tensor",  # per-tensor quantization for activations
+                observer="apot",
+                observer_kwargs={"num_terms": 2},
+            )
+        )
+    },
     ignore=["lm_head"],  # typically keep the output layer at full precision
     apot_bits=4,  # use 4-bit APoT quantization for weights
     num_terms=2,  # use 2-term APoT (sum of 2 signed powers of two)
-    scheme={
-        "weights": {
-            "num_bits": 4,
-            "type": "int",
-            "symmetric": True,
-            "strategy": "channel",  # per-channel quantization for better accuracy
-        },
-        "input_activations": {
-            "num_bits": 8,
-            "type": "int",
-            "symmetric": True,
-            "strategy": "tensor",  # per-tensor quantization for activations
-        }
-    }
 )
 
 print(f"Applying APoT quantization with {apot_recipe.num_terms} terms...")

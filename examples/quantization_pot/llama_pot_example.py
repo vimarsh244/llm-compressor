@@ -8,6 +8,7 @@ bit-shift operations instead of multiplications.
 
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from compressed_tensors.quantization import QuantizationScheme, QuantizationArgs
 
 from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization.pot import PoTQuantizationModifier
@@ -59,26 +60,30 @@ def tokenize(sample):
 
 print("Configuring PoT quantization...")
 
-# Configure PoT quantization
+# Configure PoT quantization using config_groups
 # This will quantize weights to 4-bit PoT and activations to 8-bit PoT
 pot_recipe = PoTQuantizationModifier(
-    targets=["Linear"],
+    config_groups={
+        "group_0": QuantizationScheme(
+            targets=["Linear"],
+            weights=QuantizationArgs(
+                num_bits=4,
+                type="int",
+                symmetric=True,
+                strategy="channel",  # per-channel quantization for better accuracy
+                observer="pot",
+            ),
+            input_activations=QuantizationArgs(
+                num_bits=8,
+                type="int",
+                symmetric=True,
+                strategy="tensor",  # per-tensor quantization for activations
+                observer="pot",
+            )
+        )
+    },
     ignore=["lm_head"],  # typically keep the output layer at full precision
     pot_bits=4,  # use 4-bit PoT quantization for weights
-    scheme={
-        "weights": {
-            "num_bits": 4,
-            "type": "int",
-            "symmetric": True,
-            "strategy": "channel",  # per-channel quantization for better accuracy
-        },
-        "input_activations": {
-            "num_bits": 8,
-            "type": "int", 
-            "symmetric": True,
-            "strategy": "tensor",  # per-tensor quantization for activations
-        }
-    }
 )
 
 print("Applying PoT quantization...")
