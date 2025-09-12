@@ -12,23 +12,17 @@ from llmcompressor.modifiers.quantization.apot import APoTQuantizationModifier
 
 
 def create_dummy_dataset():
-    """Create a simple dummy dataset for calibration."""
-    class DummyDataset:
-        def __init__(self):
-            self.data = [
-                {"text": "Hello world, this is a test."},
-                {"text": "The quick brown fox jumps over the lazy dog."},
-                {"text": "Machine learning is fascinating."},
-                {"text": "Power-of-two quantization enables efficient inference."},
-            ]
-        
-        def __len__(self):
-            return len(self.data)
-        
-        def __getitem__(self, idx):
-            return self.data[idx]
+    """Create a simple dummy dataset for calibration using HuggingFace datasets."""
+    from datasets import Dataset
     
-    return DummyDataset()
+    data = [
+        {"text": "Hello world, this is a test."},
+        {"text": "The quick brown fox jumps over the lazy dog."},
+        {"text": "Machine learning is fascinating."},
+        {"text": "Power-of-two quantization enables efficient inference."},
+    ]
+    
+    return Dataset.from_list(data)
 
 
 def test_pot_quantization():
@@ -47,20 +41,24 @@ def test_pot_quantization():
         
         print("Model loaded successfully")
         
-        # create PoT quantization modifier
+        # create PoT quantization modifier using config_groups
+        from compressed_tensors.quantization import QuantizationScheme, QuantizationArgs
+        
         pot_modifier = PoTQuantizationModifier(
-            targets=["Linear"],
+            config_groups={
+                "group_0": QuantizationScheme(
+                    targets=["Linear"],
+                    weights=QuantizationArgs(
+                        num_bits=4,
+                        type="int",
+                        symmetric=True,
+                        strategy="tensor",
+                        observer="pot",
+                    )
+                )
+            },
             ignore=["lm_head"],
             pot_bits=4,
-            scheme={
-                "weights": {
-                    "num_bits": 4,
-                    "type": "int",
-                    "symmetric": True,
-                    "strategy": "tensor",  # use tensor strategy for simplicity
-                    "observer": "pot",
-                }
-            }
         )
         
         print("PoT modifier created")
@@ -116,21 +114,26 @@ def test_apot_quantization():
         
         print("Model loaded successfully")
         
-        # create APoT quantization modifier
+        # create APoT quantization modifier using config_groups
+        from compressed_tensors.quantization import QuantizationScheme, QuantizationArgs
+        
         apot_modifier = APoTQuantizationModifier(
-            targets=["Linear"],
+            config_groups={
+                "group_0": QuantizationScheme(
+                    targets=["Linear"],
+                    weights=QuantizationArgs(
+                        num_bits=4,
+                        type="int",
+                        symmetric=True,
+                        strategy="tensor",
+                        observer="apot",
+                        num_terms=2,  # custom attribute for APoT
+                    )
+                )
+            },
             ignore=["lm_head"],
             apot_bits=4,
             num_terms=2,
-            scheme={
-                "weights": {
-                    "num_bits": 4,
-                    "type": "int",
-                    "symmetric": True,
-                    "strategy": "tensor",  # use tensor strategy for simplicity
-                    "observer": "apot",
-                }
-            }
         )
         
         print("APoT modifier created")
