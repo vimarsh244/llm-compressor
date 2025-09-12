@@ -8,6 +8,11 @@ from compressed_tensors.quantization.quant_args import QuantizationArgs
 from llmcompressor.observers.pot_apot import PoTObserver
 
 
+if __name__ == "__main__":
+    # Run tests when executed directly
+    pytest.main([__file__, "-v"])
+
+
 class TestPoTObserver:
     """Test cases for PoT Observer."""
     
