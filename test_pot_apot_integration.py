@@ -127,7 +127,6 @@ def test_apot_quantization():
                         symmetric=True,
                         strategy="tensor",
                         observer="apot",
-                        num_terms=2,  # custom attribute for APoT
                     )
                 )
             },

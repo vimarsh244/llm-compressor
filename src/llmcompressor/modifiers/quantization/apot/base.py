@@ -201,5 +201,5 @@ class APoTQuantizationModifier(Modifier, QuantizationMixin):
         :param state: current state
         :param kwargs: additional arguments
         """
-        # finalize quantization
-        self.finalize_quantization(state.model)
+        # finalization is handled by the base QuantizationMixin
+        pass
