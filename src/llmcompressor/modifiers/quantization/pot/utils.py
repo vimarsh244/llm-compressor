@@ -15,14 +15,16 @@ def quantize_pot(
     """
     Quantize a tensor using Power-of-Two quantization.
     
+    Standard quantization formula: quantized = round((tensor - zero_point) / scale)
+    
     :param tensor: tensor to quantize
     :param scale: scale factor (must be a power of two)
     :param zero_point: zero point (should be 0 for symmetric PoT)
     :param num_bits: number of bits for quantization
     :return: quantized tensor
     """
-    # scale the tensor
-    scaled = tensor / scale
+    # apply standard quantization formula: (tensor - zero_point) / scale
+    scaled = (tensor - zero_point) / scale
     
     # round to nearest integer
     rounded = torch.round(scaled)
@@ -32,10 +34,7 @@ def quantize_pot(
     qmax = 2 ** (num_bits - 1) - 1
     clamped = torch.clamp(rounded, qmin, qmax)
     
-    # add zero point (though it should be 0 for PoT)
-    quantized = clamped + zero_point
-    
-    return quantized.to(torch.int8 if num_bits <= 8 else torch.int32)
+    return clamped.to(torch.int8 if num_bits <= 8 else torch.int32)
 
 
 def dequantize_pot(
@@ -46,16 +45,15 @@ def dequantize_pot(
     """
     Dequantize a PoT-quantized tensor.
     
+    Standard dequantization formula: dequantized = quantized * scale + zero_point
+    
     :param quantized: quantized tensor
     :param scale: scale factor (must be a power of two)
     :param zero_point: zero point (should be 0 for symmetric PoT)
     :return: dequantized tensor
     """
-    # subtract zero point and convert to float
-    dequantized = quantized.to(torch.float32) - zero_point.to(torch.float32)
-    
-    # multiply by scale (which is a power of two)
-    dequantized = dequantized * scale
+    # apply standard dequantization formula: quantized * scale + zero_point
+    dequantized = quantized.to(torch.float32) * scale + zero_point.to(torch.float32)
     
     return dequantized
 

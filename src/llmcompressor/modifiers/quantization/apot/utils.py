@@ -108,8 +108,8 @@ def quantize_apot(
     # generate APoT levels
     levels = generate_apot_levels(num_bits, num_terms)
     
-    # scale the tensor
-    scaled = tensor / scale
+    # apply standard quantization formula: (tensor - zero_point) / scale
+    scaled = (tensor - zero_point) / scale
     
     # flatten for easier processing
     original_shape = scaled.shape
@@ -150,8 +150,8 @@ def dequantize_apot(
     # look up the quantization levels
     dequantized = levels_tensor[quantized_indices.long()]
     
-    # multiply by scale
-    dequantized = dequantized * scale
+    # apply standard dequantization formula: quantized * scale + zero_point
+    dequantized = dequantized * scale + zero_point.to(torch.float32)
     
     return dequantized
 
