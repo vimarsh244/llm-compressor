@@ -123,21 +123,27 @@ class APoTQuantizationModifier(Modifier, QuantizationMixin):
         if "weights" in scheme_dict and scheme_dict["weights"] is not None:
             scheme_dict["weights"]["observer"] = "apot"
             scheme_dict["weights"]["symmetric"] = True  # APoT is always symmetric
-            scheme_dict["weights"]["num_terms"] = self.num_terms
+            if "observer_kwargs" not in scheme_dict["weights"]:
+                scheme_dict["weights"]["observer_kwargs"] = {}
+            scheme_dict["weights"]["observer_kwargs"]["num_terms"] = self.num_terms
             if "num_bits" not in scheme_dict["weights"]:
                 scheme_dict["weights"]["num_bits"] = self.apot_bits
         
         if "input_activations" in scheme_dict and scheme_dict["input_activations"] is not None:
             scheme_dict["input_activations"]["observer"] = "apot"
             scheme_dict["input_activations"]["symmetric"] = True
-            scheme_dict["input_activations"]["num_terms"] = self.num_terms
+            if "observer_kwargs" not in scheme_dict["input_activations"]:
+                scheme_dict["input_activations"]["observer_kwargs"] = {}
+            scheme_dict["input_activations"]["observer_kwargs"]["num_terms"] = self.num_terms
             if "num_bits" not in scheme_dict["input_activations"]:
                 scheme_dict["input_activations"]["num_bits"] = 8
         
         if "output_activations" in scheme_dict and scheme_dict["output_activations"] is not None:
             scheme_dict["output_activations"]["observer"] = "apot"
             scheme_dict["output_activations"]["symmetric"] = True
-            scheme_dict["output_activations"]["num_terms"] = self.num_terms
+            if "observer_kwargs" not in scheme_dict["output_activations"]:
+                scheme_dict["output_activations"]["observer_kwargs"] = {}
+            scheme_dict["output_activations"]["observer_kwargs"]["num_terms"] = self.num_terms
             if "num_bits" not in scheme_dict["output_activations"]:
                 scheme_dict["output_activations"]["num_bits"] = 8
     
@@ -151,8 +157,10 @@ class APoTQuantizationModifier(Modifier, QuantizationMixin):
         quant_args.symmetric = True
         # set the quantization type
         quant_args.type = QuantizationType.INT
-        # add num_terms as a custom attribute
-        quant_args.num_terms = self.num_terms
+        # pass num_terms through observer_kwargs
+        if quant_args.observer_kwargs is None:
+            quant_args.observer_kwargs = {}
+        quant_args.observer_kwargs["num_terms"] = self.num_terms
     
     def _update_preset_for_apot(self, preset_name: str):
         """

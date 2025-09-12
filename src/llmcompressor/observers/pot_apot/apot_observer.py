@@ -37,8 +37,8 @@ class APoTObserver(Observer):
         :param kwargs: additional arguments (for registry compatibility)
         """
         super().__init__(quantization_args)
-        # get num_terms from quantization_args if available, otherwise use parameter
-        self.num_terms = getattr(quantization_args, 'num_terms', num_terms)
+        # get num_terms from kwargs (observer_kwargs) if available, otherwise use parameter
+        self.num_terms = kwargs.get('num_terms', num_terms)
     
     def calculate_qparams(
         self,
