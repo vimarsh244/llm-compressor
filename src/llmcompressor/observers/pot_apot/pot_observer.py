@@ -78,10 +78,17 @@ class PoTObserver(Observer):
         scale_exp = torch.round(scale_log2)
         scale = torch.pow(2.0, scale_exp)
         
-        # squeeze the scale and zero point tensors if reducing all dimensions
+        # handle dimension squeezing properly
         if len(reduce_dims) == observed.ndim:
+            # reducing all dimensions - return scalar
             scale = scale.squeeze()
             zero_point = zero_point.squeeze()
+        else:
+            # reducing some dimensions - squeeze only the reduced ones
+            # remove the keepdim dimensions that were reduced
+            for dim in sorted(reduce_dims, reverse=True):
+                scale = scale.squeeze(dim)
+                zero_point = zero_point.squeeze(dim)
         
         return scale.to(torch.float32), zero_point.to(torch.int32)
     
