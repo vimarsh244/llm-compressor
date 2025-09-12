@@ -11,8 +11,9 @@ from compressed_tensors.quantization import (
     QuantizationArgs,
     QuantizationScheme,
     QuantizationType,
+    is_preset_scheme,
 )
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from llmcompressor.core import Event, EventType, State
 from llmcompressor.modifiers.quantization.quantization.mixin import QuantizationMixin
@@ -66,6 +67,33 @@ class PoTQuantizationModifier(Modifier, QuantizationMixin):
     """
     
     pot_bits: int = Field(default=4, description="Number of bits for PoT quantization")
+    
+    @field_validator("scheme", mode="before")
+    def validate_scheme(
+        cls, value: Optional[Union[str, Dict[str, Any]]]
+    ) -> Optional[Union[str, Dict[str, Any]]]:
+        """Override scheme validation to allow direct scheme configurations."""
+        if isinstance(value, str) and not is_preset_scheme(value):
+            raise ValueError(
+                "`scheme` must either be a preset scheme name or a dictionary "
+                "of preset scheme names or a direct scheme configuration"
+            )
+
+        if isinstance(value, dict):
+            # check if this is a direct scheme configuration (has weights/activations keys)
+            scheme_keys = {"weights", "input_activations", "output_activations"}
+            if any(key in value for key in scheme_keys):
+                # this is a direct scheme configuration, allow it
+                return value
+            
+            # otherwise, validate as preset scheme names
+            for scheme_name in value.keys():
+                cls.validate_scheme(scheme_name)
+
+            for key, target in value.items():
+                value[key] = cls.validate_targets(target)
+
+        return value
     
     def on_initialize(self, state: State, **kwargs) -> bool:
         """
