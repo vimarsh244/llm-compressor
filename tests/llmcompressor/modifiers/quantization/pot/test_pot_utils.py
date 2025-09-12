@@ -53,7 +53,8 @@ class TestPoTUtils:
     
     def test_quantize_with_power_of_two_scale(self):
         """Test quantization with different power-of-two scales."""
-        tensor = torch.tensor([1.0, 2.0, 4.0, 8.0])
+        # use values that are multiples of the scale for exact recovery
+        tensor = torch.tensor([2.0, 4.0, 8.0, 16.0])
         
         # test with scale = 2^1 = 2
         scale = torch.tensor(2.0)
@@ -62,7 +63,7 @@ class TestPoTUtils:
         quantized = quantize_pot(tensor, scale, zero_point, num_bits=8)
         dequantized = dequantize_pot(quantized, scale, zero_point)
         
-        # should recover original values (scaled by 2)
+        # should recover original values exactly (since they're multiples of scale)
         assert torch.allclose(dequantized, tensor, atol=1e-6)
     
     def test_clamping_behavior(self):
