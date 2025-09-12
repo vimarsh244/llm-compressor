@@ -168,31 +168,8 @@ class APoTQuantizationModifier(Modifier, QuantizationMixin):
             "Consider using explicit scheme configuration."
         )
     
-    def _initialize_observers(self, module: torch.nn.Module):
-        """
-        Override observer initialization to use APoT observers.
-        """
-        # check if this module has a quantization scheme attached
-        if hasattr(module, "quantization_scheme"):
-            scheme = module.quantization_scheme
-            
-            # initialize APoT observers for weights
-            if scheme.weights is not None:
-                # get num_terms from the quant args if available
-                num_terms = getattr(scheme.weights, "num_terms", self.num_terms)
-                module.weight_observer = APoTObserver(scheme.weights, num_terms=num_terms)
-            
-            # initialize APoT observers for activations
-            if scheme.input_activations is not None:
-                num_terms = getattr(scheme.input_activations, "num_terms", self.num_terms)
-                module.input_observer = APoTObserver(scheme.input_activations, num_terms=num_terms)
-            
-            if scheme.output_activations is not None:
-                num_terms = getattr(scheme.output_activations, "num_terms", self.num_terms)
-                module.output_observer = APoTObserver(scheme.output_activations, num_terms=num_terms)
-        
-        # call the parent class method
-        super()._initialize_observers(module)
+    # removed _initialize_observers override - let the base system handle observer creation
+    # through the registry using the observer name in quantization_args
     
     def on_start(self, state: State, event: Event, **kwargs):
         """

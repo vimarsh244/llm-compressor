@@ -158,27 +158,8 @@ class PoTQuantizationModifier(Modifier, QuantizationMixin):
             "Consider using explicit scheme configuration."
         )
     
-    def _initialize_observers(self, module: torch.nn.Module):
-        """
-        Override observer initialization to use PoT observers.
-        """
-        # check if this module has a quantization scheme attached
-        if hasattr(module, "quantization_scheme"):
-            scheme = module.quantization_scheme
-            
-            # initialize PoT observers for weights
-            if scheme.weights is not None:
-                module.weight_observer = PoTObserver(scheme.weights)
-            
-            # initialize PoT observers for activations
-            if scheme.input_activations is not None:
-                module.input_observer = PoTObserver(scheme.input_activations)
-            
-            if scheme.output_activations is not None:
-                module.output_observer = PoTObserver(scheme.output_activations)
-        
-        # call the parent class method
-        super()._initialize_observers(module)
+    # removed _initialize_observers override - let the base system handle observer creation
+    # through the registry using the observer name in quantization_args
     
     def on_start(self, state: State, event: Event, **kwargs):
         """

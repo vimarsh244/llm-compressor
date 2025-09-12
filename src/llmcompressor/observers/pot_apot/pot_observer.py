@@ -23,6 +23,19 @@ class PoTObserver(Observer):
     efficient computation using bit-shift operations instead of multiplication.
     """
     
+    def __init__(
+        self,
+        quantization_args: QuantizationArgs,
+        **kwargs,
+    ):
+        """
+        Initialize PoT observer.
+        
+        :param quantization_args: quantization arguments
+        :param kwargs: additional arguments (for registry compatibility)
+        """
+        super().__init__(quantization_args)
+    
     def calculate_qparams(
         self,
         observed: Tensor,

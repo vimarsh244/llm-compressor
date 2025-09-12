@@ -27,15 +27,18 @@ class APoTObserver(Observer):
         self,
         quantization_args: QuantizationArgs,
         num_terms: int = 2,
+        **kwargs,
     ):
         """
         Initialize APoT observer.
         
         :param quantization_args: quantization arguments
         :param num_terms: number of power-of-two terms to use (default: 2)
+        :param kwargs: additional arguments (for registry compatibility)
         """
         super().__init__(quantization_args)
-        self.num_terms = num_terms
+        # get num_terms from quantization_args if available, otherwise use parameter
+        self.num_terms = getattr(quantization_args, 'num_terms', num_terms)
     
     def calculate_qparams(
         self,
