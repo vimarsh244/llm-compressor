@@ -66,6 +66,21 @@ def load_model_and_tokenizer(model_path, model_name):
         # Dispatch for generation
         dispatch_for_generation(model)
         
+        # patch prepare_inputs_for_generation to avoid duplicate attention_mask
+        try:
+            if hasattr(model, "prepare_inputs_for_generation"):
+                _orig_prepare = model.prepare_inputs_for_generation
+                def _patched_prepare_inputs_for_generation(input_ids, **kwargs):
+                    # remove attention_mask before and after calling original
+                    kwargs.pop("attention_mask", None)
+                    prepared = _orig_prepare(input_ids, **kwargs)
+                    if isinstance(prepared, dict):
+                        prepared.pop("attention_mask", None)
+                    return prepared
+                model.prepare_inputs_for_generation = _patched_prepare_inputs_for_generation
+        except Exception:
+            pass
+        
         # Sanity check: tokenizer/model vocab alignment
         try:
             vocab_size_model = model.get_input_embeddings().weight.size(0)
