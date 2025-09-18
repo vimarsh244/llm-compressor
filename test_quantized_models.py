@@ -27,6 +27,35 @@ TEST_PROMPTS = [
     "Write a recipe for chocolate cake:"
 ]
 
+def _audit_model_devices(model):
+    try:
+        devices = {str(p.device) for p in model.parameters()}
+        if hasattr(model, "buffers"):
+            devices |= {str(b.device) for b in model.buffers()}
+        if "cpu" in devices:
+            print(f"! Warning: some model tensors are on CPU; devices: {sorted(list(devices))}")
+        elif len(devices) > 1:
+            print(f"! Info: model is sharded across devices: {sorted(list(devices))}")
+        else:
+            print(f"Model tensors are on device: {next(iter(devices))}")
+    except Exception:
+        pass
+
+
+def _force_single_device(model, prefer_cuda=True):
+    try:
+        from compressed_tensors.utils import remove_dispatch as _rd
+    except Exception:
+        _rd = None
+    try:
+        if _rd is not None:
+            _rd(model)
+        device = "cuda:0" if prefer_cuda and torch.cuda.is_available() else "cpu"
+        model.to(device)
+        print(f"moved model to single device: {device}")
+    except Exception as e:
+        print(f"! failed to move model to single device: {e}")
+
 def load_model_and_tokenizer(model_path, model_name):
     """Load a quantized model and its tokenizer."""
     print(f"\n{'='*60}")
@@ -71,7 +100,6 @@ def load_model_and_tokenizer(model_path, model_name):
             if hasattr(model, "prepare_inputs_for_generation"):
                 _orig_prepare = model.prepare_inputs_for_generation
                 def _patched_prepare_inputs_for_generation(input_ids, **kwargs):
-                    # remove attention_mask before and after calling original
                     kwargs.pop("attention_mask", None)
                     prepared = _orig_prepare(input_ids, **kwargs)
                     if isinstance(prepared, dict):
@@ -94,6 +122,7 @@ def load_model_and_tokenizer(model_path, model_name):
         print(f"✓ {model_name} model loaded successfully!")
         print(f"Model device: {next(model.parameters()).device}")
         print(f"Model dtype: {next(model.parameters()).dtype}")
+        _audit_model_devices(model)
         
         return model, tokenizer
         
@@ -142,8 +171,9 @@ def generate_text(model, tokenizer, prompt, max_new_tokens=100, temperature=0.7,
         except Exception:
             pass
         
-        # Move to model device
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+        # Move to model device (best-effort: use the device of input embeddings)
+        target_device = next(model.get_input_embeddings().parameters()).device
+        inputs = {k: v.to(target_device) for k, v in inputs.items()}
         
         # Safe logits processor to clamp NaN/Inf before sampling
         try:
@@ -166,6 +196,7 @@ def generate_text(model, tokenizer, prompt, max_new_tokens=100, temperature=0.7,
                 do_sample=True,
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id,
+                use_cache=True,
                 logits_processor=logits_processor,
             )
         
@@ -176,7 +207,28 @@ def generate_text(model, tokenizer, prompt, max_new_tokens=100, temperature=0.7,
         return generated_text.strip()
         
     except Exception as e:
-        # Hint to help debugging CUDA asserts
+        # retry once on single device if device mismatch
+        if "Expected all tensors to be on the same device" in str(e) or "mat2 is on cpu" in str(e):
+            _force_single_device(model)
+            try:
+                target_device = next(model.get_input_embeddings().parameters()).device
+                inputs = build_inputs(tokenizer, prompt)
+                inputs = {k: v.to(target_device) for k, v in inputs.items()}
+                with torch.no_grad():
+                    outputs = model.generate(
+                        input_ids=inputs["input_ids"],
+                        max_new_tokens=max_new_tokens,
+                        temperature=temperature,
+                        top_p=top_p,
+                        do_sample=True,
+                        pad_token_id=tokenizer.pad_token_id,
+                        eos_token_id=tokenizer.eos_token_id,
+                        use_cache=True,
+                    )
+                generated_tokens = outputs[0][inputs['input_ids'].shape[1]:]
+                return tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+            except Exception as e2:
+                return f"Error during generation after retry: {e2}"
         if "device-side assert triggered" in str(e).lower():
             return (
                 "Error during generation: CUDA device-side assert. "
