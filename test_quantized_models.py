@@ -42,16 +42,39 @@ def load_model_and_tokenizer(model_path, model_name):
             tokenizer.pad_token = tokenizer.eos_token
         tokenizer.padding_side = "left"
         
+        # Prefer bf16 for better numerical stability if supported
+        dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
+        
         # Load model
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
-            torch_dtype=torch.float16,  # Use float16 for efficiency
+            torch_dtype=dtype,
             device_map="auto",
             trust_remote_code=True
         )
         
+        # Ensure generation config has proper ids
+        if getattr(model, "generation_config", None) is not None:
+            if model.generation_config.pad_token_id is None and tokenizer.pad_token_id is not None:
+                model.generation_config.pad_token_id = tokenizer.pad_token_id
+            if model.generation_config.eos_token_id is None and tokenizer.eos_token_id is not None:
+                model.generation_config.eos_token_id = tokenizer.eos_token_id
+        
+        # Put model in eval mode
+        model.eval()
+        
         # Dispatch for generation
         dispatch_for_generation(model)
+        
+        # Sanity check: tokenizer/model vocab alignment
+        try:
+            vocab_size_model = model.get_input_embeddings().weight.size(0)
+            vocab_size_tok = len(tokenizer)
+            if vocab_size_tok != vocab_size_model:
+                print(f"! tokenizer vocab ({vocab_size_tok}) != model embeddings ({vocab_size_model})")
+                # don't resize weights for quantized checkpoints; just warn user
+        except Exception:
+            pass
         
         print(f"✓ {model_name} model loaded successfully!")
         print(f"Model device: {next(model.parameters()).device}")
@@ -92,8 +115,31 @@ def generate_text(model, tokenizer, prompt, max_new_tokens=100, temperature=0.7,
         # Tokenize input with proper attention mask
         inputs = build_inputs(tokenizer, prompt)
         
+        # Validate token ids against model vocab to avoid device-side asserts
+        try:
+            vocab_size_model = model.get_input_embeddings().weight.size(0)
+            max_input_id = int(inputs["input_ids"].max().item())
+            if max_input_id >= vocab_size_model:
+                return (
+                    f"Input id {max_input_id} exceeds model vocab {vocab_size_model - 1}. "
+                    f"Tokenizer/model mismatch. Ensure tokenizer matches the quantized checkpoint."
+                )
+        except Exception:
+            pass
+        
         # Move to model device
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
+        
+        # Safe logits processor to clamp NaN/Inf before sampling
+        try:
+            from transformers.generation.logits_process import LogitsProcessor, LogitsProcessorList
+            class _SafeLogitsProcessor(LogitsProcessor):
+                def __call__(self, input_ids, scores):
+                    scores = torch.nan_to_num(scores, neginf=-1e9, posinf=1e9)
+                    return torch.clamp(scores, min=-1e9, max=1e9)
+            logits_processor = LogitsProcessorList([_SafeLogitsProcessor()])
+        except Exception:
+            logits_processor = None
         
         # Generate with proper parameters
         with torch.no_grad():
@@ -105,6 +151,7 @@ def generate_text(model, tokenizer, prompt, max_new_tokens=100, temperature=0.7,
                 do_sample=True,
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id,
+                logits_processor=logits_processor,
             )
         
         # Decode only the new tokens
@@ -114,6 +161,12 @@ def generate_text(model, tokenizer, prompt, max_new_tokens=100, temperature=0.7,
         return generated_text.strip()
         
     except Exception as e:
+        # Hint to help debugging CUDA asserts
+        if "device-side assert triggered" in str(e).lower():
+            return (
+                "Error during generation: CUDA device-side assert. "
+                "Try setting CUDA_LAUNCH_BLOCKING=1 and ensure tokenizer matches model."
+            )
         return f"Error during generation: {e}"
 
 def test_model_generation(model, tokenizer, model_name):
