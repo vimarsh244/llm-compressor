@@ -144,7 +144,7 @@ def generate_text(model, tokenizer, prompt, max_new_tokens=100, temperature=0.7,
         # Generate with proper parameters
         with torch.no_grad():
             outputs = model.generate(
-                **inputs,
+                input_ids=inputs["input_ids"],
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_p=top_p,
