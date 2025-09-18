@@ -16,17 +16,35 @@ def parse_args():
     parser.add_argument("--device", type=str, default=None, help="Device string for model_args (e.g., cuda:0)")
     parser.add_argument("--use_accelerate", action="store_true", help="Pass use_accelerate=True to model_args")
     parser.add_argument("--output_path", type=str, default=None, help="Where to write results JSON")
-    parser.add_argument("--model_kind", type=str, default="hf-causal-experimental", help="Harness model adapter (hf-causal or hf-causal-experimental)")
+    parser.add_argument(
+        "--model_kind",
+        type=str,
+        default="hf",
+        help="Harness model adapter (e.g., hf, huggingface, hf-auto; see your lm-eval version's supported adapters)",
+    )
+    parser.add_argument("--apply_chat_template", action="store_true", help="Apply chat template for instruct/chat models")
+    parser.add_argument("--fewshot_as_multiturn", action="store_true", help="Render fewshot as multi-turn chat when applying template")
     parser.add_argument("--extra_model_args", type=str, default=None, help="Additional model_args key=value pairs,comma-separated")
     return parser.parse_args()
 
 
-def build_model_args(pretrained: str, device: Optional[str], use_accelerate: bool, extra: Optional[str]) -> str:
+def build_model_args(
+    pretrained: str,
+    device: Optional[str],
+    use_accelerate: bool,
+    apply_chat_template: bool,
+    fewshot_as_multiturn: bool,
+    extra: Optional[str],
+) -> str:
     parts: List[str] = [f"pretrained={pretrained}"]
     if device:
         parts.append(f"device={device}")
     if use_accelerate:
         parts.append("use_accelerate=True")
+    if apply_chat_template:
+        parts.append("apply_chat_template=True")
+        if fewshot_as_multiturn:
+            parts.append("fewshot_as_multiturn=True")
     if extra:
         # expect comma-separated key=value
         for kv in extra.split(","):
@@ -48,8 +66,22 @@ def main():
         )
         raise
 
+    # auto-enable chat template for instruct/chat models if not provided
+    auto_apply_chat = False
+    lcase = args.pretrained.lower()
+    if any(k in lcase for k in ["instruct", "chat", "-it", "-sft", "-align"]):
+        auto_apply_chat = True
+    apply_chat = args.apply_chat_template or auto_apply_chat
+
     tasks = [t.strip() for t in args.tasks.split(",") if t.strip()]
-    model_args = build_model_args(args.pretrained, args.device, args.use_accelerate, args.extra_model_args)
+    model_args = build_model_args(
+        pretrained=args.pretrained,
+        device=args.device,
+        use_accelerate=args.use_accelerate,
+        apply_chat_template=apply_chat,
+        fewshot_as_multiturn=args.fewshot_as_multiturn,
+        extra=args.extra_model_args,
+    )
 
     print(f"Running lm-eval: model={args.model_kind} tasks={tasks} model_args={model_args}")
 
