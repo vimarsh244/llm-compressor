@@ -82,14 +82,21 @@ def _load_model_and_tokenizer(model_path: str, trust_remote_code: bool, prefer_b
 
 def _iter_texts(args) -> Iterable[str]:
     name = args.dataset.lower()
-    if name in ("lambada", "lambada_openai"):
-        # HF id: "lambada" with config "openai"
+    if name in ("lambada", "lambada_openai", "lambada_plain"):
+        # Prefer the OPENAI split if available, otherwise fall back to plain_text config
         split = args.split or "validation"
+        ds = None
         try:
             ds = load_dataset("lambada", "openai", split=split, streaming=args.streaming)
         except Exception:
-            # some mirrors only offer test split
-            ds = load_dataset("lambada", "openai", split="test", streaming=args.streaming)
+            pass
+        if ds is None:
+            # try same split without config (plain_text)
+            try:
+                ds = load_dataset("lambada", split=split, streaming=args.streaming)
+            except Exception:
+                # final fallback to test split
+                ds = load_dataset("lambada", split="test", streaming=args.streaming)
         text_col = args.text_column or "text"
         for i, ex in enumerate(ds):
             if args.max_samples and i >= args.max_samples:
