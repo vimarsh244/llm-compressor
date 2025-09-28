@@ -1,155 +1,141 @@
-"""
-Example script demonstrating Power-of-Two (PoT) quantization using llm-compressor.
+"""End-to-end PoT quantization example with calibration data."""
 
-This script shows how to apply PoT quantization to a LLaMA model, which constrains
-all weights and activations to powers of two, enabling efficient inference using
-bit-shift operations instead of multiplications.
-"""
+from pathlib import Path
 
+import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from compressed_tensors.quantization import QuantizationScheme, QuantizationArgs
+from compressed_tensors.quantization import QuantizationArgs, QuantizationScheme
 
 from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization.pot import PoTQuantizationModifier
-from llmcompressor.utils import dispatch_for_generation
-
-# Select model and load it
-# MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
-MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-
-# this is for if there are multi gpus - ideally will use them
-import torch
 from llmcompressor.transformers.compression.helpers import calculate_offload_device_map
-
-device_map = calculate_offload_device_map(
-    MODEL_ID,
-    reserve_for_hessians=True,
-    num_gpus=torch.cuda.device_count(),
-    trust_remote_code=True,
+from llmcompressor.transformers.compression.quantization_format import (
+    infer_and_set_per_module_quantization_format,
 )
-
-print(f"Loading model: {MODEL_ID}")
-model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto", device_map=device_map)
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
-
-# Select calibration dataset
-DATASET_ID = "mit-han-lab/pile-val-backup"
-DATASET_SPLIT = "validation"
-
-# DATASET_ID = "neuralmagic/LLM_compression_calibration"
-# DATASET_SPLIT = "train"
-
-# Select number of samples for calibration
-NUM_CALIBRATION_SAMPLES = 4096
-MAX_SEQUENCE_LENGTH = 2048
-
-print(f"Loading calibration dataset: {DATASET_ID}")
-ds = load_dataset(DATASET_ID, split=f"{DATASET_SPLIT}[:{NUM_CALIBRATION_SAMPLES}]")
-ds = ds.shuffle(seed=42)
+from llmcompressor.transformers.finetune.data.open_platypus import OpenPlatypusDataset
 
 
-def preprocess(example):
-    """Preprocess the dataset examples."""
-    return {
-        "text": tokenizer.apply_chat_template(
-            [{"role": "user", "content": example["text"]}],
-            tokenize=False,
-        )
-    }
+def _build_calibration_dataset(dataset_id, dataset_split, num_samples):
+    raw = load_dataset(dataset_id, split=f"{dataset_split}[:{num_samples}]")
+    raw = raw.shuffle(seed=42)
+
+    template = OpenPlatypusDataset.ALPACA_TEMPLATE
+
+    def to_text(example):
+        instruction = example.get("instruction", example.get("text", ""))
+        if example.get("input"):
+            prompt = template["prompt_input"].format(
+                instruction=instruction,
+                input=example.get("input", ""),
+            )
+        else:
+            prompt = template["prompt_no_input"].format(instruction=instruction)
+
+        text = prompt
+        if example.get("output"):
+            text += example["output"]
+        return {"text": text}
+
+    processed = raw.map(to_text, remove_columns=raw.column_names)
+    return processed
 
 
-ds = ds.map(preprocess)
-
-
-def tokenize(sample):
-    """Tokenize the input samples."""
-    return tokenizer(
-        sample["text"],
-        padding=False,
-        max_length=MAX_SEQUENCE_LENGTH,
-        truncation=True,
-        add_special_tokens=False,
+def build_pot_modifier(weight_bits: int, activation_bits: int) -> PoTQuantizationModifier:
+    return PoTQuantizationModifier(
+        config_groups={
+            "group_0": QuantizationScheme(
+                targets=["Linear"],
+                weights=QuantizationArgs(
+                    num_bits=weight_bits,
+                    type="int",
+                    symmetric=True,
+                    strategy="channel",
+                ),
+                input_activations=QuantizationArgs(
+                    num_bits=activation_bits,
+                    type="int",
+                    symmetric=True,
+                    strategy="tensor",
+                ),
+                output_activations=QuantizationArgs(
+                    num_bits=activation_bits,
+                    type="int",
+                    symmetric=True,
+                    strategy="tensor",
+                ),
+            )
+        },
+        ignore=["lm_head"],
+        pot_bits=weight_bits,
     )
 
 
-print("Configuring PoT quantization...")
+def main():
+    model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    dataset_id = "mit-han-lab/pile-val-backup"
+    dataset_split = "validation"
+    num_calibration_samples = 2048
+    max_seq_length = 2048
+    output_dir = Path("TinyLlama-1.1B-Chat-v1.0-pot-w4a8")
 
-# Configure PoT quantization using config_groups
-# This will quantize weights to 8-bit PoT and activations to 8-bit PoT
-weight_bits = 8
-activation_bits = 8
+    print(f"Calculating device map for {model_id}")
+    device_map = calculate_offload_device_map(
+        model_id,
+        reserve_for_hessians=True,
+        num_gpus=torch.cuda.device_count(),
+        trust_remote_code=True,
+    )
 
-pot_recipe = PoTQuantizationModifier(
-    config_groups={
-        "group_0": QuantizationScheme(
-            targets=["Linear"],
-            weights=QuantizationArgs(
-                num_bits=weight_bits,
-                type="int",
-                symmetric=True,
-                strategy="channel",
-            ),
-            input_activations=QuantizationArgs(
-                num_bits=activation_bits,
-                type="int",
-                symmetric=True,
-                strategy="tensor",
-            ),
-            output_activations=QuantizationArgs(
-                num_bits=activation_bits,
-                type="int",
-                symmetric=True,
-                strategy="tensor",
-            ),
-        )
-    },
-    ignore=["lm_head"],  # typically keep the output layer at full precision
-    pot_bits=weight_bits,
-)
+    print(f"Loading model: {model_id}")
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        torch_dtype="auto",
+        device_map=device_map,
+        trust_remote_code=True,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
-print("Applying PoT quantization...")
+    print(f"Preparing calibration dataset from {dataset_id}")
+    calibration_dataset = _build_calibration_dataset(
+        dataset_id, dataset_split, num_calibration_samples
+    )
 
-# Apply PoT quantization
-oneshot(
-    model=model,
-    # dataset=ds,
-    dataset='open_platypus',
-    recipe=pot_recipe,
-    output_dir="TinyLlama-1.1B-Chat-v1.0-pot-w8a8",
-    max_seq_length=MAX_SEQUENCE_LENGTH,
-    num_calibration_samples=NUM_CALIBRATION_SAMPLES,
-)
+    weight_bits = 4
+    activation_bits = 8
+    pot_modifier = build_pot_modifier(weight_bits, activation_bits)
 
-print("PoT quantization completed!")
-[]
-# Test the quantized model
-print("\n" + "="*50)
-print("TESTING QUANTIZED MODEL GENERATION")
-print("="*50)
+    print("Running oneshot calibration with PoT modifier")
+    quantized_model = oneshot(
+        model=model,
+        dataset=calibration_dataset,
+        recipe=pot_modifier,
+        output_dir=None,
+        max_seq_length=max_seq_length,
+        num_calibration_samples=min(len(calibration_dataset), num_calibration_samples),
+        pad_to_max_length=False,
+    )
 
-from vllm import LLM
-model = LLM("TinyLlama-1.1B-Chat-v1.0-pot-w8a8", device_map=device_map)
-output = model.generate("The python code to generate first 1000 digits of pi is: ```")
+    print("Inferring quantization formats for compressed-tensors compatibility")
+    infer_and_set_per_module_quantization_format(
+        quantized_model, save_compressed=True
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    quantized_model.save_pretrained(output_dir, save_compressed=True)
+    tokenizer.save_pretrained(output_dir)
+
+    print("\n" + "=" * 50)
+    print("TESTING QUANTIZED MODEL GENERATION")
+    print("=" * 50)
+    from vllm import LLM
+
+    llm = LLM(str(output_dir))
+    prompt = "Explain why quantization helps with edge deployment:"
+    result = llm.generate(prompt)
+    print(result)
 
 
-# dispatch_for_generation(model)
-# input_ids = tokenizer("Hello, my name is", return_tensors="pt").input_ids.to(
-#     model.device
-# )
-# output = model.generate(input_ids, max_new_tokens=100, do_sample=False)
-# generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
-# print(f"Generated text: {generated_text}")
-
-# print("="*50 + "\n")
-
-# # Save the quantized model
-# SAVE_DIR = MODEL_ID.split("/")[-1] + "-pot-w8a8"
-# print(f"Saving quantized model to: {SAVE_DIR}")
-# model.save_pretrained(SAVE_DIR, save_compressed=True)
-# tokenizer.save_pretrained(SAVE_DIR)
-
-# print("Model saved successfully!")
-# print(f"\nTo load the quantized model later:")
-# print(f"model = AutoModelForCausalLM.from_pretrained('{SAVE_DIR}')")
-# print(f"tokenizer = AutoTokenizer.from_pretrained('{SAVE_DIR}')")
+if __name__ == "__main__":
+    main()

@@ -12,8 +12,11 @@ from compressed_tensors.quantization import QuantizationArgs, QuantizationScheme
 from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization.apot import APoTQuantizationModifier
 from llmcompressor.modifiers.quantization.pot import PoTQuantizationModifier
+from llmcompressor.transformers.compression.quantization_format import (
+    infer_and_set_per_module_quantization_format,
+)
 
-from .lm_eval_utils import (
+from lm_eval_utils import (
     collect_perplexity_metrics,
     compute_perplexity_delta,
     dump_json,
@@ -115,6 +118,11 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Comma separated key=value items passed through to lm_eval",
     )
+    parser.add_argument(
+        "--lm_eval_run_compressed",
+        action="store_true",
+        help="If set, run lm_eval against the compressed model without decompressing",
+    )
     parser.add_argument("--activation_bits", type=int, default=8)
     parser.add_argument("--weight_bits", type=int, default=4)
     parser.add_argument("--apot_terms", type=int, default=2)
@@ -134,15 +142,26 @@ def _run_quantization(
     trust_remote_code: bool,
     output_dir: Optional[str],
 ):
-    oneshot(
+    resolved_dir = output_dir or os.path.join(
+        os.getcwd(), f"{model_id.split('/')[-1]}-{quantization_kind}"
+    )
+
+    quantized_model = oneshot(
         model=model_id,
         recipe=modifier,
         dataset=dataset,
         max_seq_length=max_seq_length,
         num_calibration_samples=max_samples,
-        output_dir=output_dir or f"{model_id.split('/')[-1]}-{quantization_kind}",
+        output_dir=resolved_dir,
         trust_remote_code_model=trust_remote_code,
     )
+    if quantized_model is None:
+        raise RuntimeError("`oneshot` did not return a quantized model instance")
+
+    infer_and_set_per_module_quantization_format(
+        quantized_model, save_compressed=True
+    )
+    quantized_model.save_pretrained(resolved_dir, save_compressed=True)
 
 
 def main():
@@ -195,6 +214,16 @@ def main():
         quantized_model_path = args.output_dir or args.model_id
 
     print(f"Running perplexity for quantized model at {quantized_model_path}")
+    extra_model_args = args.extra_model_args
+    if not args.lm_eval_run_compressed:
+        token = "quantization_config.run_compressed=False"
+        if extra_model_args:
+            if isinstance(extra_model_args, str):
+                extra_model_args = f"{extra_model_args},{token}"
+            else:
+                extra_model_args = f"{extra_model_args},{token}"
+        else:
+            extra_model_args = token
     try:
         quant_results = run_lm_eval(
             pretrained=quantized_model_path,
@@ -204,7 +233,7 @@ def main():
             limit=args.limit,
             device=args.device,
             use_accelerate=args.use_accelerate,
-            extra_model_args=args.extra_model_args,
+            extra_model_args=extra_model_args,
         )
     except Exception as exc:
         print(f"Quantized model evaluation failed: {exc}")

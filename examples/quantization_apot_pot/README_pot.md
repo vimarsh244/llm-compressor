@@ -15,18 +15,27 @@ Power-of-Two (PoT) quantization constrains all quantized values to powers of two
 
 ## Examples
 
-### Basic PoT Quantization
+### Script With Calibration
 
 ```bash
 python llama_pot_example.py
 ```
 
-This example demonstrates:
-- Loading a LLaMA model
-- Applying 4-bit PoT quantization to weights
-- Applying 8-bit PoT quantization to activations
-- Testing the quantized model
-- Saving the compressed model
+The example now fetches calibration samples from the Pile validation split, runs PoT
+quantization with APoT-compatible hooks, and saves a checkpoint that contains the
+compressed-tensors metadata required by vLLM.
+
+### Weight-Only Quantization
+
+```bash
+python quantize_weights_only.py \
+  TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
+  TinyLlama-1.1B-Chat-v1.0-pot-w4-weight-only \
+  --kind pot --weight-bits 4
+```
+
+Use the weight-only helper when you want to skip calibration yet still produce a
+compressed checkpoint.
 
 ## Configuration Options
 
