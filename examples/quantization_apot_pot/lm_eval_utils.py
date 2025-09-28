@@ -1,191 +1,137 @@
 #!/usr/bin/env python3
-"""Shared helpers for running `lm_eval` from quantization examples."""
+"""Shared helpers for running manual perplexity evaluation on quantized models."""
 
 from __future__ import annotations
 
 import json
-import warnings
+import math
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-# Keywords that usually indicate chat/instruction-tuned checkpoints
-_CHAT_KEYWORDS = ("instruct", "chat", "-it", "-sft", "-align")
+import torch
+from datasets import load_dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from llmcompressor.utils.dev import dispatch_for_generation
 
 
-def parse_extra_model_args(extra: Optional[Sequence[str]]) -> List[str]:
-    """Normalize user-provided key=value pairs for `lm_eval` model args."""
-
-    if extra is None:
-        return []
-
-    if isinstance(extra, str):
-        extra_iter: Iterable[str] = extra.split(",")
-    else:
-        extra_iter = extra
-
-    parsed: List[str] = []
-    for item in extra_iter:
-        token = item.strip()
-        if not token:
-            continue
-        if "=" not in token:
-            raise ValueError(f"Expected key=value pair for extra model arg, got: {token}")
-        parsed.append(token)
-    return parsed
-
-
-def should_auto_apply_chat_template(pretrained: str) -> bool:
-    """Heuristic to decide whether to turn on chat templates automatically."""
-
-    lowered = pretrained.lower()
-    return any(keyword in lowered for keyword in _CHAT_KEYWORDS)
-
-
-def build_model_args(
-    pretrained: str,
+def tokenize_batch(
+    tokenizer: AutoTokenizer,
+    texts: Sequence[str],
     *,
-    device: Optional[str] = None,
-    use_accelerate: bool = False,
-    apply_chat_template: bool = False,
-    fewshot_as_multiturn: bool = False,
-    extra: Optional[Sequence[str]] = None,
-) -> str:
-    """Construct the comma-separated `model_args` string for `lm_eval`."""
-
-    parts: List[str] = [f"pretrained={pretrained}"]
-
-    if device:
-        parts.append(f"device={device}")
-    if use_accelerate:
-        parts.append("use_accelerate=True")
-    if apply_chat_template:
-        parts.append("apply_chat_template=True")
-        if fewshot_as_multiturn:
-            parts.append("fewshot_as_multiturn=True")
-
-    for kv in parse_extra_model_args(extra):
-        parts.append(kv)
-
-    return ",".join(parts)
-
-
-def run_lm_eval(
-    *,
-    pretrained: str,
-    tasks: Sequence[str] | str,
-    model_kind: str = "hf",
-    batch_size: str | int = "2",
-    num_fewshot: int = 0,
-    limit: Optional[str] = None,
-    device: Optional[str] = None,
-    use_accelerate: bool = False,
-    apply_chat_template: Optional[bool] = None,
-    fewshot_as_multiturn: bool = False,
-    extra_model_args: Optional[Sequence[str]] = None,
-) -> Dict[str, Any]:
-    """Execute `lm_eval`'s simple_evaluate helper with shared defaults."""
-
-    try:
-        from lm_eval import evaluator  # type: ignore
-    except Exception as exc:  # pragma: no cover - dependency import guard
-        raise ImportError(
-            "lm-eval is not installed. Install with: pip install -U lm-eval"
-        ) from exc
-
-    task_list = (
-        [t.strip() for t in tasks.split(",") if t.strip()]
-        if isinstance(tasks, str)
-        else [t.strip() for t in tasks if t and t.strip()]
+    device: torch.device,
+    max_seq_length: int,
+) -> Dict[str, torch.Tensor]:
+    batch = tokenizer(
+        list(texts),
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=max_seq_length,
     )
+    batch = {k: v.to(device) for k, v in batch.items()}
+    input_ids = batch["input_ids"]
+    attention_mask = batch.get("attention_mask")
+    labels = input_ids.clone()
+    if attention_mask is not None:
+        labels[attention_mask == 0] = -100
+    batch["labels"] = labels
+    return batch
 
-    if not task_list:
-        raise ValueError("At least one evaluation task must be provided")
 
-    auto_chat = should_auto_apply_chat_template(pretrained)
-    apply_chat = auto_chat if apply_chat_template is None else apply_chat_template
+def accumulate_nll(
+    model: AutoModelForCausalLM,
+    batch: Dict[str, torch.Tensor],
+) -> Dict[str, float]:
+    with torch.no_grad():
+        outputs = model(**batch)
+        loss = outputs.loss
+    if torch.isnan(loss) or torch.isinf(loss):
+        return {"nll": float("nan"), "tokens": 0}
+    tokens = int((batch["labels"] != -100).sum().item())
+    return {"nll": float(loss.item()) * tokens, "tokens": tokens}
 
-    def _invoke(apply_chat_flag: bool) -> Dict[str, Any]:
-        model_args = build_model_args(
-            pretrained=pretrained,
+
+def compute_perplexity_manual(
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    dataset_iter: Iterable[str],
+    *,
+    max_seq_length: int,
+    batch_size: int,
+    device: torch.device,
+) -> float:
+    dispatch_for_generation(model)
+    model.eval()
+
+    total_nll = 0.0
+    total_tokens = 0
+    pending: List[str] = []
+
+    def _flush() -> None:
+        nonlocal total_nll, total_tokens, pending
+        if not pending:
+            return
+        batch = tokenize_batch(
+            tokenizer,
+            pending,
             device=device,
-            use_accelerate=use_accelerate,
-            apply_chat_template=apply_chat_flag,
-            fewshot_as_multiturn=fewshot_as_multiturn,
-            extra=extra_model_args,
+            max_seq_length=max_seq_length,
         )
+        stats = accumulate_nll(model, batch)
+        if math.isnan(stats["nll"]):
+            pending = []
+            return
+        total_nll += stats["nll"]
+        total_tokens += stats["tokens"]
+        pending = []
 
-        return evaluator.simple_evaluate(
-            model=model_kind,
-            model_args=model_args,
-            tasks=task_list,
-            num_fewshot=num_fewshot,
-            batch_size=batch_size,
-            limit=limit,
-        )
+    for text in dataset_iter:
+        pending.append(text)
+        if len(pending) >= batch_size:
+            _flush()
 
-    try:
-        return _invoke(apply_chat)
-    except TypeError as exc:
-        if apply_chat and "apply_chat_template" in str(exc):
-            warnings.warn(
-                "lm_eval backend rejected apply_chat_template; rerunning without chat template",
-                RuntimeWarning,
-            )
-            return _invoke(False)
-        raise
+    _flush()
 
-
-def collect_perplexity_metrics(results: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
-    """Extract metrics ending with `perplexity` from an lm_eval result payload."""
-
-    metrics: Dict[str, Dict[str, float]] = {}
-    if not results:
-        return metrics
-
-    per_task = results.get("results", {})
-    for task, task_metrics in per_task.items():
-        if not isinstance(task_metrics, dict):
-            continue
-        for metric_name, value in task_metrics.items():
-            if "perplexity" not in metric_name.lower():
-                continue
-            if isinstance(value, (int, float)):
-                metrics.setdefault(task, {})[metric_name] = float(value)
-    return metrics
+    if total_tokens == 0:
+        return float("nan")
+    avg_nll = total_nll / total_tokens
+    return float(math.exp(avg_nll))
 
 
-def compute_perplexity_delta(
-    baseline: Dict[str, Dict[str, float]],
-    candidate: Dict[str, Dict[str, float]],
-) -> Dict[str, Dict[str, float]]:
-    """Return candidate-baseline difference for overlapping perplexity metrics."""
+def load_dataset_iterator(
+    dataset: str,
+    *,
+    max_samples: int,
+    split: Optional[str] = None,
+    text_column: Optional[str] = None,
+) -> Iterable[str]:
+    dataset_lower = dataset.lower()
+    resolved_split = split or "validation"
 
-    delta: Dict[str, Dict[str, float]] = {}
-    for task, metric_map in candidate.items():
-        for metric_name, value in metric_map.items():
-            ref = baseline.get(task, {}).get(metric_name)
-            if ref is None:
-                continue
-            delta.setdefault(task, {})[metric_name] = value - ref
-    return delta
+    if dataset_lower in ("lambada", "lambada_openai", "lambada_plain"):
+        try:
+            ds = load_dataset("lambada", "openai", split=resolved_split)
+        except Exception:
+            ds = load_dataset("lambada", split=resolved_split)
+        column = text_column or "text"
+    elif dataset_lower in ("pile_val", "the_pile_val", "pile-validation"):
+        ds = load_dataset("json", data_files="https://the-eye.eu/public/AI/pile/val.jsonl.zst", split="train")
+        column = text_column or "text"
+    else:
+        ds = load_dataset(dataset, split=resolved_split)
+        if text_column:
+            column = text_column
+        else:
+            cols = getattr(ds, "column_names", None) or []
+            column = "text" if "text" in cols else cols[0]
 
-
-def summarize_perplexity(label: str, metrics: Dict[str, Dict[str, float]]) -> str:
-    """Create a human-friendly summary string for perplexity metrics."""
-
-    lines = [label]
-    if not metrics:
-        lines.append("  (no perplexity metrics reported)")
-        return "\n".join(lines)
-
-    for task in sorted(metrics):
-        pieces = [f"{name}={value:.4f}" for name, value in sorted(metrics[task].items())]
-        lines.append(f"  - {task}: {', '.join(pieces)}")
-    return "\n".join(lines)
+    for idx, row in enumerate(ds):
+        if max_samples and max_samples > 0 and idx >= max_samples:
+            break
+        yield row[column]
 
 
 def dump_json(path: str, payload: Dict[str, Any]) -> None:
-    """Persist evaluation payload to disk."""
-
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
 

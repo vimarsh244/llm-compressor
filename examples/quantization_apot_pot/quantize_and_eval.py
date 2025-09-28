@@ -8,6 +8,9 @@ import os
 from dataclasses import dataclass
 from typing import List, Optional
 
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
 from compressed_tensors.quantization import QuantizationArgs, QuantizationScheme
 from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization.apot import APoTQuantizationModifier
@@ -17,11 +20,9 @@ from llmcompressor.transformers.compression.quantization_format import (
 )
 
 from lm_eval_utils import (
-    collect_perplexity_metrics,
-    compute_perplexity_delta,
+    compute_perplexity_manual,
     dump_json,
-    run_lm_eval,
-    summarize_perplexity,
+    load_dataset_iterator,
 )
 
 
@@ -99,36 +100,66 @@ def _build_apot_modifier(config: QuantizationConfig) -> APoTQuantizationModifier
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Quantize LLaMA models and evaluate perplexity with lm_eval")
-    parser.add_argument("--model_id", default="TinyLlama/TinyLlama_v1.1")
+    parser = argparse.ArgumentParser(
+        description="Quantize LLaMA models and evaluate perplexity manually"
+    )
+    parser.add_argument("--model_id", default="meta-llama/Meta-Llama-3-8B-Instruct")
     parser.add_argument("--dataset", default="open_platypus")
     parser.add_argument("--max_calibration_samples", type=int, default=512)
     parser.add_argument("--max_seq_length", type=int, default=2048)
     parser.add_argument("--trust_remote_code", action="store_true")
     parser.add_argument("--quantization", choices=["pot", "apot"], default="pot")
     parser.add_argument("--output_dir", default=None)
-    parser.add_argument("--tasks", default="lambada_openai")
-    parser.add_argument("--batch_size", default="2")
-    parser.add_argument("--num_fewshot", type=int, default=0)
-    parser.add_argument("--limit", default="200")
-    parser.add_argument("--device", default=None)
-    parser.add_argument("--use_accelerate", action="store_true")
-    parser.add_argument(
-        "--extra_model_args",
-        default=None,
-        help="Comma separated key=value items passed through to lm_eval",
-    )
-    parser.add_argument(
-        "--lm_eval_run_compressed",
-        action="store_true",
-        help="If set, run lm_eval against the compressed model without decompressing",
-    )
     parser.add_argument("--activation_bits", type=int, default=8)
     parser.add_argument("--weight_bits", type=int, default=4)
     parser.add_argument("--apot_terms", type=int, default=2)
     parser.add_argument("--save_results", default=None)
     parser.add_argument("--skip_quantization", action="store_true")
+    parser.add_argument(
+        "--eval_dataset",
+        default="lambada_openai",
+        help="Dataset used for perplexity evaluation when none is specified",
+    )
+    parser.add_argument("--eval_split", default="validation")
+    parser.add_argument("--eval_text_column", default=None)
+    parser.add_argument("--eval_max_samples", type=int, default=200)
+    parser.add_argument("--eval_batch_size", type=int, default=8)
+    parser.add_argument("--eval_seq_length", type=int, default=1024)
+    parser.add_argument("--device", default=None)
     return parser.parse_args()
+
+
+def _resolve_device(user_device: Optional[str]) -> torch.device:
+    if user_device:
+        return torch.device(user_device)
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+def _load_model_and_tokenizer(
+    model_id: str,
+    *,
+    trust_remote_code: bool,
+    device: torch.device,
+) -> tuple[AutoModelForCausalLM, AutoTokenizer]:
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_id,
+        trust_remote_code=trust_remote_code,
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    dtype = torch.float16 if device.type == "cuda" else torch.float32
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        torch_dtype=dtype,
+        trust_remote_code=trust_remote_code,
+        device_map=None,
+    )
+    model.to(device)
+    model.eval()
+    return model, tokenizer
 
 
 def _run_quantization(
@@ -179,20 +210,30 @@ def main():
         else _build_pot_modifier(quant_config)
     )
 
-    print(f"Running baseline perplexity for {args.model_id} on tasks {args.tasks}")
-    baseline_results = run_lm_eval(
-        pretrained=args.model_id,
-        tasks=args.tasks,
-        batch_size=args.batch_size,
-        num_fewshot=args.num_fewshot,
-        limit=args.limit,
-        device=args.device,
-        use_accelerate=args.use_accelerate,
-        extra_model_args=args.extra_model_args,
-    )
-    baseline_metrics = collect_perplexity_metrics(baseline_results)
+    eval_dataset = args.eval_dataset or args.dataset
+    device = _resolve_device(args.device)
 
-    print(summarize_perplexity("Baseline perplexity", baseline_metrics))
+    print(f"Running baseline perplexity for {args.model_id} on {eval_dataset}")
+    baseline_model, baseline_tokenizer = _load_model_and_tokenizer(
+        args.model_id,
+        trust_remote_code=args.trust_remote_code,
+        device=device,
+    )
+    baseline_iter = load_dataset_iterator(
+        eval_dataset,
+        max_samples=args.eval_max_samples,
+        split=args.eval_split,
+        text_column=args.eval_text_column,
+    )
+    baseline_ppl = compute_perplexity_manual(
+        baseline_model,
+        baseline_tokenizer,
+        baseline_iter,
+        max_seq_length=args.eval_seq_length,
+        batch_size=args.eval_batch_size,
+        device=device,
+    )
+    print(f"Baseline perplexity: {baseline_ppl:.4f}")
 
     if not args.skip_quantization:
         quant_dir = args.output_dir or os.path.join(os.getcwd(), f"{args.model_id.split('/')[-1]}-{args.quantization}-w{args.weight_bits}a{args.activation_bits}")
@@ -214,46 +255,34 @@ def main():
         quantized_model_path = args.output_dir or args.model_id
 
     print(f"Running perplexity for quantized model at {quantized_model_path}")
-    extra_model_args = args.extra_model_args
-    if not args.lm_eval_run_compressed:
-        token = "quantization_config.run_compressed=False"
-        if extra_model_args:
-            if isinstance(extra_model_args, str):
-                extra_model_args = f"{extra_model_args},{token}"
-            else:
-                extra_model_args = f"{extra_model_args},{token}"
-        else:
-            extra_model_args = token
-    try:
-        quant_results = run_lm_eval(
-            pretrained=quantized_model_path,
-            tasks=args.tasks,
-            batch_size=args.batch_size,
-            num_fewshot=args.num_fewshot,
-            limit=args.limit,
-            device=args.device,
-            use_accelerate=args.use_accelerate,
-            extra_model_args=extra_model_args,
-        )
-    except Exception as exc:
-        print(f"Quantized model evaluation failed: {exc}")
-        raise
-    quant_metrics = collect_perplexity_metrics(quant_results)
-
-    delta = compute_perplexity_delta(baseline_metrics, quant_metrics)
-
-    print(summarize_perplexity("Quantized perplexity", quant_metrics))
-    print(summarize_perplexity("Delta (quant - base)", delta))
+    quant_model, quant_tokenizer = _load_model_and_tokenizer(
+        quantized_model_path,
+        trust_remote_code=args.trust_remote_code,
+        device=device,
+    )
+    quant_iter = load_dataset_iterator(
+        eval_dataset,
+        max_samples=args.eval_max_samples,
+        split=args.eval_split,
+        text_column=args.eval_text_column,
+    )
+    quant_ppl = compute_perplexity_manual(
+        quant_model,
+        quant_tokenizer,
+        quant_iter,
+        max_seq_length=args.eval_seq_length,
+        batch_size=args.eval_batch_size,
+        device=device,
+    )
+    print(f"Quantized perplexity: {quant_ppl:.4f}")
+    delta = quant_ppl - baseline_ppl
+    print(f"Perplexity delta (quant - baseline): {delta:.4f}")
 
     if args.save_results:
         payload = {
-            "baseline": baseline_results,
-            "quantized": quant_results,
-            "perplexity_summary": {
-                "baseline": baseline_metrics,
-                "quantized": quant_metrics,
-                "delta": delta,
-            },
+            "baseline_perplexity": baseline_ppl,
+            "quantized_perplexity": quant_ppl,
+            "delta": delta,
         }
         dump_json(args.save_results, payload)
 
