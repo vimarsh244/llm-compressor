@@ -14,11 +14,22 @@ from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization.apot import APoTQuantizationModifier
 from llmcompressor.utils import dispatch_for_generation
 
+# this is for if there are multi gpus - ideally will use them
+import torch
+from llmcompressor.transformers.compression.helpers import calculate_offload_device_map
+
+device_map = calculate_offload_device_map(
+    MODEL_ID,
+    reserve_for_hessians=True,
+    num_gpus=torch.cuda.device_count(),
+    trust_remote_code=True,
+)
+
 # Select model and load it
 MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 print(f"Loading model: {MODEL_ID}")
-model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto")
+model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto", device_map=device_map)
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
 # Select calibration dataset
@@ -114,5 +125,5 @@ print("="*50)
 
 
 from vllm import LLM
-model = LLM("TinyLlama-1.1B-Chat-v1.0-apot-w8a8-t4")
+model = LLM("TinyLlama-1.1B-Chat-v1.0-apot-w8a8-t4", device_map=device_map)
 output = model.generate("The python code to generate first 1000 digits of pi is:")
