@@ -42,6 +42,18 @@ def accumulate_nll(
     model: AutoModelForCausalLM,
     batch: Dict[str, torch.Tensor],
 ) -> Dict[str, float]:
+    labels = batch.get("labels")
+    if labels is not None:
+        valid = labels[labels >= 0]
+        if valid.numel() > 0:
+            max_label = int(valid.max().item())
+            vocab_size = model.get_output_embeddings().weight.size(0)
+            if max_label >= vocab_size:
+                raise ValueError(
+                    f"Found token id {max_label} >= vocab size {vocab_size}. "
+                    "Ensure tokenizer and model vocabularies are aligned."
+                )
+
     with torch.no_grad():
         outputs = model(**batch)
         loss = outputs.loss

@@ -51,9 +51,9 @@ class APoTObserver(Observer):
         Calculate APoT quantization parameters for the observed tensor.
         
         For APoT quantization:
-        - Scale determines the base power-of-two range
+        - Scale determines the range for APoT quantization levels
         - Zero point is always 0 for symmetric quantization
-        - The actual quantization levels are determined by the APoT configuration
+        - Values will be constrained to sums of powers of two during quantization
         
         :param observed: tensor to calculate quantization parameters for
         :param reduce_dims: optional dimensions to reduce along
@@ -70,27 +70,23 @@ class APoTObserver(Observer):
         # avoid zero max values
         max_val = torch.clamp(max_val, min=1e-8)
         
-        # for APoT, we need to determine the range of powers to use
-        # we'll use the max value to determine the highest power needed
-        log2_max = torch.log2(max_val)
-        max_exponent = torch.ceil(log2_max)
-        
-        # the scale represents the base unit for APoT quantization
-        # we scale it based on the number of bits and terms available
         num_bits = self.quantization_args.num_bits
         
-        # for APoT with k terms, we can represent more values
-        # adjust the scale to account for the additive nature
-        effective_bits = num_bits - 1  # reserve one bit for sign
+        # Import APoT utility functions
+        from llmcompressor.modifiers.quantization.apot.utils import generate_apot_levels
         
-        # calculate the range of exponents we'll use
-        # this depends on the number of terms and bits available
-        exponent_range = effective_bits // self.num_terms
+        # Generate the actual APoT quantization levels
+        apot_levels = generate_apot_levels(num_bits, self.num_terms)
+        max_apot_level = max(abs(level) for level in apot_levels)
         
-        # the scale is based on the maximum exponent we need to represent
-        # divided by the number of quantization levels
-        num_levels = self._calculate_num_apot_levels(num_bits, self.num_terms)
-        scale = torch.pow(2.0, max_exponent) / (num_levels // 2)
+        # Calculate scale so that max_val maps to the maximum APoT level
+        # This ensures the full APoT range is utilized properly
+        scale = max_val / max_apot_level
+        
+        # Ensure scale is a power of two for efficient hardware implementation
+        scale_log2 = torch.log2(scale)
+        scale_exp = torch.round(scale_log2)
+        scale = torch.pow(2.0, scale_exp)
         
         # for symmetric quantization, zero point is always 0
         zero_point = torch.zeros_like(scale, dtype=torch.int32)
@@ -98,11 +94,6 @@ class APoTObserver(Observer):
         # apply global scale if provided
         if global_scale is not None:
             scale = scale * global_scale
-        
-        # ensure scale is a power of two for efficiency
-        scale_log2 = torch.log2(scale)
-        scale_exp = torch.round(scale_log2)
-        scale = torch.pow(2.0, scale_exp)
         
         # handle dimension squeezing properly
         if len(reduce_dims) == observed.ndim:
@@ -164,3 +155,44 @@ class APoTObserver(Observer):
         reduce_dims = tuple(i for i in range(observed.ndim) if i != dim)
         
         return self.calculate_qparams(observed, reduce_dims, tensor_id)
+    
+    def fake_quantize(
+        self,
+        observed: Tensor,
+        scale: Optional[Tensor] = None,
+        zero_point: Optional[Tensor] = None,
+    ) -> Tensor:
+        """
+        Apply APoT fake quantization to the observed tensor.
+        
+        This method quantizes the tensor using proper APoT logic where
+        values are constrained to sums of powers of two, then dequantizes
+        back to floating point for gradient flow during training.
+        
+        :param observed: tensor to fake quantize
+        :param scale: optional scale override
+        :param zero_point: optional zero point override
+        :return: fake quantized tensor
+        """
+        # Calculate qparams if not provided
+        if scale is None or zero_point is None:
+            calc_scale, calc_zero_point = self.calculate_qparams(observed)
+            if scale is None:
+                scale = calc_scale
+            if zero_point is None:
+                zero_point = calc_zero_point
+        
+        # Import APoT utility functions
+        from llmcompressor.modifiers.quantization.apot.utils import fake_quantize_apot
+        
+        # Apply true APoT fake quantization
+        # This will constrain values to sums of powers of two
+        fake_quantized = fake_quantize_apot(
+            observed,
+            scale,
+            zero_point,
+            num_bits=self.quantization_args.num_bits,
+            num_terms=self.num_terms,
+        )
+        
+        return fake_quantized

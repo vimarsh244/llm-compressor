@@ -15,45 +15,82 @@ def quantize_pot(
     """
     Quantize a tensor using Power-of-Two quantization.
     
-    Standard quantization formula: quantized = round((tensor - zero_point) / scale)
+    True PoT quantization constrains values to exact powers of two:
+    0, ±2^0, ±2^1, ±2^2, ..., ±2^(num_bits-2)
     
     :param tensor: tensor to quantize
     :param scale: scale factor (must be a power of two)
     :param zero_point: zero point (should be 0 for symmetric PoT)
     :param num_bits: number of bits for quantization
-    :return: quantized tensor
+    :return: quantized tensor (indices into PoT levels)
     """
-    # apply standard quantization formula: (tensor - zero_point) / scale
+    # Generate PoT quantization levels: 0, ±1, ±2, ±4, ±8, ...
+    max_exp = num_bits - 2  # reserve one bit for sign, one for range
+    pot_levels = [0.0]  # include zero
+    
+    # Add positive and negative powers of two
+    for exp in range(max_exp + 1):
+        level = 2.0 ** exp
+        pot_levels.extend([level, -level])
+    
+    # Sort levels for easier lookup
+    pot_levels = sorted(pot_levels)
+    
+    # Scale the input tensor
     scaled = (tensor - zero_point) / scale
     
-    # round to nearest integer
-    rounded = torch.round(scaled)
+    # Find nearest PoT level for each element
+    quantized = torch.zeros_like(scaled, dtype=torch.int32)
     
-    # clamp to the quantization range
-    qmin = -(2 ** (num_bits - 1))
-    qmax = 2 ** (num_bits - 1) - 1
-    clamped = torch.clamp(rounded, qmin, qmax)
+    # Vectorized approach for efficiency
+    scaled_flat = scaled.flatten()
+    quantized_flat = quantized.flatten()
     
-    return clamped.to(torch.int8 if num_bits <= 8 else torch.int32)
+    for i, val in enumerate(scaled_flat):
+        # Find the nearest PoT level
+        val_item = val.item()
+        nearest_idx = min(range(len(pot_levels)), 
+                         key=lambda j: abs(pot_levels[j] - val_item))
+        quantized_flat[i] = nearest_idx
+    
+    return quantized_flat.reshape(tensor.shape)
 
 
 def dequantize_pot(
     quantized: Tensor,
     scale: Tensor,
     zero_point: Tensor,
+    num_bits: int = 8,
 ) -> Tensor:
     """
     Dequantize a PoT-quantized tensor.
     
-    Standard dequantization formula: dequantized = quantized * scale + zero_point
+    Maps quantized indices back to PoT levels, then applies scale and zero_point.
     
-    :param quantized: quantized tensor
+    :param quantized: quantized tensor (indices into PoT levels)
     :param scale: scale factor (must be a power of two)
     :param zero_point: zero point (should be 0 for symmetric PoT)
+    :param num_bits: number of bits for quantization
     :return: dequantized tensor
     """
-    # apply standard dequantization formula: quantized * scale + zero_point
-    dequantized = quantized.to(torch.float32) * scale + zero_point.to(torch.float32)
+    # Regenerate PoT levels (same as in quantize_pot)
+    max_exp = num_bits - 2
+    pot_levels = [0.0]
+    
+    for exp in range(max_exp + 1):
+        level = 2.0 ** exp
+        pot_levels.extend([level, -level])
+    
+    pot_levels = sorted(pot_levels)
+    
+    # Convert to tensor for efficient lookup
+    levels_tensor = torch.tensor(pot_levels, dtype=torch.float32, device=quantized.device)
+    
+    # Look up the PoT levels
+    dequantized = levels_tensor[quantized.long()]
+    
+    # Apply scale and zero point
+    dequantized = dequantized * scale + zero_point.to(torch.float32)
     
     return dequantized
 
@@ -67,6 +104,8 @@ def fake_quantize_pot(
     """
     Fake quantize a tensor using PoT quantization (quantize then dequantize).
     
+    This constrains values to exact powers of two during training.
+    
     :param tensor: tensor to fake quantize
     :param scale: scale factor (must be a power of two)
     :param zero_point: zero point (should be 0 for symmetric PoT)
@@ -74,7 +113,7 @@ def fake_quantize_pot(
     :return: fake quantized tensor
     """
     quantized = quantize_pot(tensor, scale, zero_point, num_bits)
-    dequantized = dequantize_pot(quantized, scale, zero_point)
+    dequantized = dequantize_pot(quantized, scale, zero_point, num_bits)
     return dequantized
 
 

@@ -130,14 +130,15 @@ def main():
     dispatch_for_generation(quantized_model)
 
     input_ids = tokenizer(
-        "The capital of France is: ",
+        "The capital of France is ",
         return_tensors="pt",
     ).input_ids.to(quantized_model.device)
 
     output = quantized_model.generate(
         input_ids,
-        max_new_tokens=100,
-        do_sample=False,
+        max_new_tokens=128,
+        do_sample=True,
+        temperature=0.7,
     )
     generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
     print(f"Generated text: {generated_text}")
