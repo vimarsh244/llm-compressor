@@ -165,8 +165,25 @@ def compute_perplexity(args) -> float:
     device = _resolve_device(args.device)
     model, tokenizer = _load_model_and_tokenizer(args.model_path, args.trust_remote_code, args.bf16, device)
 
+    # debug: test model with a simple forward pass first
+    print("Testing model with simple input...")
+    try:
+        test_input = tokenizer("Hello world", return_tensors="pt").to(device)
+        with torch.no_grad():
+            test_output = model(**test_input, labels=test_input["input_ids"])
+            test_loss = test_output.loss
+            print(f"Test forward pass loss: {test_loss.item()}")
+            if torch.isnan(test_loss) or torch.isinf(test_loss):
+                print("! Model produces NaN/Inf on simple input - quantization may be broken")
+                return float('nan')
+    except Exception as e:
+        print(f"! Model test failed: {e}")
+        return float('nan')
+
     total_neg_log_likelihood = 0.0
     total_tokens = 0
+    valid_batches = 0
+    nan_batches = 0
 
     texts_iter = _iter_texts(args)
 
@@ -203,10 +220,18 @@ def compute_perplexity(args) -> float:
             else:
                 outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
                 loss = outputs.loss  # mean over non-ignored tokens
+                
+                if torch.isnan(loss) or torch.isinf(loss):
+                    nan_batches += 1
+                    print(f"! NaN/Inf loss in batch, skipping...")
+                    batch = []
+                    continue
+                    
                 # estimate number of predicted tokens
                 num_pred_tokens = int((labels != -100).sum().item())
                 total_neg_log_likelihood += float(loss.item()) * num_pred_tokens
                 total_tokens += num_pred_tokens
+                valid_batches += 1
 
         batch = []
 
@@ -223,12 +248,20 @@ def compute_perplexity(args) -> float:
                 labels[attention_mask == 0] = -100
             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
             loss = outputs.loss
-            num_pred_tokens = int((labels != -100).sum().item())
-            total_neg_log_likelihood += float(loss.item()) * num_pred_tokens
-            total_tokens += num_pred_tokens
+            
+            if not (torch.isnan(loss) or torch.isinf(loss)):
+                num_pred_tokens = int((labels != -100).sum().item())
+                total_neg_log_likelihood += float(loss.item()) * num_pred_tokens
+                total_tokens += num_pred_tokens
+                valid_batches += 1
+            else:
+                nan_batches += 1
 
+    print(f"Evaluation summary: {valid_batches} valid batches, {nan_batches} NaN/Inf batches")
+    
     if total_tokens == 0:
-        raise RuntimeError("No tokens were evaluated; check dataset/text column settings")
+        print("No valid tokens were evaluated; all batches had NaN/Inf losses")
+        return float('nan')
 
     avg_nll = total_neg_log_likelihood / total_tokens
     ppl = math.exp(avg_nll)
