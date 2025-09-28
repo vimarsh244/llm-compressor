@@ -4,21 +4,37 @@ import argparse
 from pathlib import Path
 
 from transformers import AutoTokenizer
+from compressed_tensors.quantization import QuantizationArgs, QuantizationScheme
 
 from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization.apot import APoTQuantizationModifier
 from llmcompressor.modifiers.quantization.pot import PoTQuantizationModifier
+from llmcompressor.transformers.compression.quantization_format import (
+    infer_and_set_per_module_quantization_format,
+)
 
 
 def build_weight_only_modifier(kind: str, weight_bits: int, num_terms: int | None):
+    weight_scheme = QuantizationScheme(
+        targets=["Linear"],
+        weights=QuantizationArgs(
+            num_bits=weight_bits,
+            type="int",
+            symmetric=True,
+            strategy="channel",
+        ),
+    )
+
     if kind == "apot":
         return APoTQuantizationModifier(
+            config_groups={"group_0": weight_scheme},
             apot_bits=weight_bits,
             num_terms=num_terms or 2,
             ignore=["lm_head"],
         )
     if kind == "pot":
         return PoTQuantizationModifier(
+            config_groups={"group_0": weight_scheme},
             pot_bits=weight_bits,
             ignore=["lm_head"],
         )
@@ -38,9 +54,14 @@ def quantize_weight_only(
         model=model_id,
         recipe=modifier,
         dataset=None,
+        pipeline="datafree",
         output_dir=output_dir,
         clear_sparse_session=True,
         quantization_aware_calibration=False,
+    )
+
+    infer_and_set_per_module_quantization_format(
+        quantized_model, save_compressed=True
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)

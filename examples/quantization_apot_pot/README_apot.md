@@ -31,6 +31,12 @@ python quantize_weights_only.py \
   TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
   TinyLlama-1.1B-Chat-v1.0-apot-w4-weight-only \
   --kind apot --weight-bits 4 --apot-terms 2
+
+```
+
+Because APoT uses activation observers, the script explicitly requests the
+`datafree` pipeline when calling `oneshot`. This prevents the sequential pipeline
+from attempting to iterate over missing calibration data.
 ```
 
 The weight-only utility skips calibration entirely and still produces a compressed
