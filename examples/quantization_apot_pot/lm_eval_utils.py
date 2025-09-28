@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 # Keywords that usually indicate chat/instruction-tuned checkpoints
@@ -102,23 +103,35 @@ def run_lm_eval(
     auto_chat = should_auto_apply_chat_template(pretrained)
     apply_chat = auto_chat if apply_chat_template is None else apply_chat_template
 
-    model_args = build_model_args(
-        pretrained=pretrained,
-        device=device,
-        use_accelerate=use_accelerate,
-        apply_chat_template=apply_chat,
-        fewshot_as_multiturn=fewshot_as_multiturn,
-        extra=extra_model_args,
-    )
+    def _invoke(apply_chat_flag: bool) -> Dict[str, Any]:
+        model_args = build_model_args(
+            pretrained=pretrained,
+            device=device,
+            use_accelerate=use_accelerate,
+            apply_chat_template=apply_chat_flag,
+            fewshot_as_multiturn=fewshot_as_multiturn,
+            extra=extra_model_args,
+        )
 
-    return evaluator.simple_evaluate(
-        model=model_kind,
-        model_args=model_args,
-        tasks=task_list,
-        num_fewshot=num_fewshot,
-        batch_size=batch_size,
-        limit=limit,
-    )
+        return evaluator.simple_evaluate(
+            model=model_kind,
+            model_args=model_args,
+            tasks=task_list,
+            num_fewshot=num_fewshot,
+            batch_size=batch_size,
+            limit=limit,
+        )
+
+    try:
+        return _invoke(apply_chat)
+    except TypeError as exc:
+        if apply_chat and "apply_chat_template" in str(exc):
+            warnings.warn(
+                "lm_eval backend rejected apply_chat_template; rerunning without chat template",
+                RuntimeWarning,
+            )
+            return _invoke(False)
+        raise
 
 
 def collect_perplexity_metrics(results: Dict[str, Any]) -> Dict[str, Dict[str, float]]:

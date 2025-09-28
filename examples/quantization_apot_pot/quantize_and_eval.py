@@ -195,16 +195,20 @@ def main():
         quantized_model_path = args.output_dir or args.model_id
 
     print(f"Running perplexity for quantized model at {quantized_model_path}")
-    quant_results = run_lm_eval(
-        pretrained=quantized_model_path,
-        tasks=args.tasks,
-        batch_size=args.batch_size,
-        num_fewshot=args.num_fewshot,
-        limit=args.limit,
-        device=args.device,
-        use_accelerate=args.use_accelerate,
-        extra_model_args=args.extra_model_args,
-    )
+    try:
+        quant_results = run_lm_eval(
+            pretrained=quantized_model_path,
+            tasks=args.tasks,
+            batch_size=args.batch_size,
+            num_fewshot=args.num_fewshot,
+            limit=args.limit,
+            device=args.device,
+            use_accelerate=args.use_accelerate,
+            extra_model_args=args.extra_model_args,
+        )
+    except Exception as exc:
+        print(f"Quantized model evaluation failed: {exc}")
+        raise
     quant_metrics = collect_perplexity_metrics(quant_results)
 
     delta = compute_perplexity_delta(baseline_metrics, quant_metrics)
