@@ -13,6 +13,7 @@ from llmcompressor.transformers.compression.helpers import calculate_offload_dev
 from llmcompressor.transformers.compression.quantization_format import (
     infer_and_set_per_module_quantization_format,
 )
+from llmcompressor.utils.dev import dispatch_for_generation
 from llmcompressor.transformers.finetune.data.open_platypus import OpenPlatypusDataset
 
 
@@ -77,7 +78,7 @@ def main():
     dataset_split = "validation"
     num_calibration_samples = 2048
     max_seq_length = 2048
-    output_dir = Path("TinyLlama-1.1B-Chat-v1.0-pot-w4a8")
+    save_dir = Path(model_id.split("/")[-1] + "-pot-w4a8")
 
     print(f"Calculating device map for {model_id}")
     device_map = calculate_offload_device_map(
@@ -122,19 +123,34 @@ def main():
     infer_and_set_per_module_quantization_format(
         quantized_model, save_compressed=True
     )
-    output_dir.mkdir(parents=True, exist_ok=True)
-    quantized_model.save_pretrained(output_dir, save_compressed=True)
-    tokenizer.save_pretrained(output_dir)
 
     print("\n" + "=" * 50)
     print("TESTING QUANTIZED MODEL GENERATION")
     print("=" * 50)
-    from vllm import LLM
+    dispatch_for_generation(quantized_model)
 
-    llm = LLM(str(output_dir))
-    prompt = "Explain why quantization helps with edge deployment:"
-    result = llm.generate(prompt)
-    print(result)
+    input_ids = tokenizer(
+        "The capital of France is: ",
+        return_tensors="pt",
+    ).input_ids.to(quantized_model.device)
+
+    output = quantized_model.generate(
+        input_ids,
+        max_new_tokens=100,
+        do_sample=False,
+    )
+    generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
+    print(f"Generated text: {generated_text}")
+    print("=" * 50 + "\n")
+
+    print(f"Saving quantized model to: {save_dir}")
+    quantized_model.save_pretrained(save_dir, save_compressed=True)
+    tokenizer.save_pretrained(save_dir)
+
+    print("Model saved successfully!")
+    print("\nTo load the quantized model later:")
+    print(f"model = AutoModelForCausalLM.from_pretrained('{save_dir}')")
+    print(f"tokenizer = AutoTokenizer.from_pretrained('{save_dir}')")
 
 
 if __name__ == "__main__":
