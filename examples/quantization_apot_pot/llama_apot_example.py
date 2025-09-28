@@ -18,15 +18,15 @@ from llmcompressor.utils import dispatch_for_generation
 MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 # this is for if there are multi gpus - ideally will use them
-import torch
-from llmcompressor.transformers.compression.helpers import calculate_offload_device_map
+# import torch
+# from llmcompressor.transformers.compression.helpers import calculate_offload_device_map
 
-device_map = calculate_offload_device_map(
-    MODEL_ID,
-    reserve_for_hessians=True,
-    num_gpus=torch.cuda.device_count(),
-    trust_remote_code=True,
-)
+# device_map = calculate_offload_device_map(
+#     MODEL_ID,
+#     reserve_for_hessians=True,
+#     num_gpus=torch.cuda.device_count(),
+#     trust_remote_code=True,
+# )
 
 print(f"Loading model: {MODEL_ID}")
 model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto", device_map=device_map)
@@ -40,7 +40,7 @@ DATASET_ID = "garage-bAInd/Open-Platypus"
 DATASET_SPLIT = "train"
 
 # Select number of samples for calibration
-NUM_CALIBRATION_SAMPLES = 20480
+NUM_CALIBRATION_SAMPLES = 4096
 MAX_SEQUENCE_LENGTH = 2048
 
 print(f"Loading calibration dataset: {DATASET_ID}")

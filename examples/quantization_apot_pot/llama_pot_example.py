@@ -41,7 +41,7 @@ DATASET_SPLIT = "validation"
 # DATASET_SPLIT = "train"
 
 # Select number of samples for calibration
-NUM_CALIBRATION_SAMPLES = 20480
+NUM_CALIBRATION_SAMPLES = 4096
 MAX_SEQUENCE_LENGTH = 2048
 
 print(f"Loading calibration dataset: {DATASET_ID}")
