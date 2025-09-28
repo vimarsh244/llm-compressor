@@ -14,6 +14,9 @@ from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization.apot import APoTQuantizationModifier
 from llmcompressor.utils import dispatch_for_generation
 
+# Select model and load it
+MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
 # this is for if there are multi gpus - ideally will use them
 import torch
 from llmcompressor.transformers.compression.helpers import calculate_offload_device_map
@@ -24,9 +27,6 @@ device_map = calculate_offload_device_map(
     num_gpus=torch.cuda.device_count(),
     trust_remote_code=True,
 )
-
-# Select model and load it
-MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 print(f"Loading model: {MODEL_ID}")
 model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto", device_map=device_map)
@@ -75,32 +75,41 @@ def tokenize(sample):
 print("Configuring APoT quantization...")
 
 # Configure APoT quantization using config_groups
-# This will quantize weights to 4-bit APoT with 2 terms and activations to 8-bit APoT
+# This will quantize weights to 8-bit APoT with 4 terms and activations to 8-bit APoT
+weight_bits = 8
+activation_bits = 8
+num_terms = 4
+
 apot_recipe = APoTQuantizationModifier(
-    # config_groups={
-    #     "group_0": QuantizationScheme(
-    #         targets=["Linear"],
-    #         weights=QuantizationArgs(
-    #             num_bits=8,
-    #             type="int",
-    #             symmetric=True,
-    #             strategy="channel",  # per-channel quantization for better accuracy
-    #             observer="apot",
-    #             observer_kwargs={"num_terms": 4},
-    #         ),
-    #         input_activations=QuantizationArgs(
-    #             num_bits=8,
-    #             type="int",
-    #             symmetric=True,
-    #             strategy="tensor",  # per-tensor quantization for activations
-    #             observer="apot",
-    #             observer_kwargs={"num_terms": 4},
-    #         )
-    #     )
-    # },
+    config_groups={
+        "group_0": QuantizationScheme(
+            targets=["Linear"],
+            weights=QuantizationArgs(
+                num_bits=weight_bits,
+                type="int",
+                symmetric=True,
+                strategy="channel",
+                observer_kwargs={"num_terms": num_terms},
+            ),
+            input_activations=QuantizationArgs(
+                num_bits=activation_bits,
+                type="int",
+                symmetric=True,
+                strategy="tensor",
+                observer_kwargs={"num_terms": num_terms},
+            ),
+            output_activations=QuantizationArgs(
+                num_bits=activation_bits,
+                type="int",
+                symmetric=True,
+                strategy="tensor",
+                observer_kwargs={"num_terms": num_terms},
+            ),
+        )
+    },
     ignore=["lm_head"],  # typically keep the output layer at full precision
-    apot_bits=8,  # use 8-bit APoT quantization for weights
-    num_terms=4,  # use 4-term APoT (sum of 4 signed powers of two)
+    apot_bits=weight_bits,
+    num_terms=num_terms,
 )
 
 print(f"Applying APoT quantization with {apot_recipe.num_terms} terms...")

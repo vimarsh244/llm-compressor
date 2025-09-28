@@ -14,19 +14,20 @@ from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization.pot import PoTQuantizationModifier
 from llmcompressor.utils import dispatch_for_generation
 
+# Select model and load it
+# MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
+MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
 # this is for if there are multi gpus - ideally will use them
-from llmcompressor.transformers.compression.helpers import calculate_offload_device_map
 import torch
+from llmcompressor.transformers.compression.helpers import calculate_offload_device_map
+
 device_map = calculate_offload_device_map(
     MODEL_ID,
     reserve_for_hessians=True,
     num_gpus=torch.cuda.device_count(),
     trust_remote_code=True,
 )
-
-# Select model and load it
-# MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
-MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 print(f"Loading model: {MODEL_ID}")
 model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto", device_map=device_map)
@@ -75,29 +76,36 @@ def tokenize(sample):
 print("Configuring PoT quantization...")
 
 # Configure PoT quantization using config_groups
-# This will quantize weights to 4-bit PoT and activations to 8-bit PoT
+# This will quantize weights to 8-bit PoT and activations to 8-bit PoT
+weight_bits = 8
+activation_bits = 8
+
 pot_recipe = PoTQuantizationModifier(
-    # config_groups={
-    #     "group_0": QuantizationScheme(
-    #         targets=["Linear"],
-    #         weights=QuantizationArgs(
-    #             num_bits=8,
-    #             type="int",
-    #             symmetric=True,
-    #             strategy="channel",  # per-channel quantization for better accuracy
-    #             observer="pot",
-    #         ),
-    #         input_activations=QuantizationArgs(
-    #             num_bits=8,
-    #             type="int",
-    #             symmetric=True,
-    #             strategy="tensor",  # per-tensor quantization for activations
-    #             observer="pot",
-    #         )
-    #     )
-    # },
+    config_groups={
+        "group_0": QuantizationScheme(
+            targets=["Linear"],
+            weights=QuantizationArgs(
+                num_bits=weight_bits,
+                type="int",
+                symmetric=True,
+                strategy="channel",
+            ),
+            input_activations=QuantizationArgs(
+                num_bits=activation_bits,
+                type="int",
+                symmetric=True,
+                strategy="tensor",
+            ),
+            output_activations=QuantizationArgs(
+                num_bits=activation_bits,
+                type="int",
+                symmetric=True,
+                strategy="tensor",
+            ),
+        )
+    },
     ignore=["lm_head"],  # typically keep the output layer at full precision
-    pot_bits=8,  # use 8-bit PoT quantization for weights
+    pot_bits=weight_bits,
 )
 
 print("Applying PoT quantization...")
