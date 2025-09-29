@@ -1,8 +1,7 @@
-"""Combined test script for both APoT and PoT quantized models."""
+"""Fixed test script using proper loading for quantized models instead of vLLM."""
 
 from pathlib import Path
 import time
-import argparse
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -23,20 +22,14 @@ TEST_PROMPTS = [
     "Write a recipe for chocolate cake:"
 ]
 
-# Default model paths
-DEFAULT_MODELS = {
-    "apot": "TinyLlama-1.1B-Chat-v1.0-apot-w4a8-t2",
-    "pot": "TinyLlama-1.1B-Chat-v1.0-pot-w4a8"
-}
 
-
-def test_quantized_model(model_path: str, model_type: str):
-    """Test a quantized model with various prompts."""
+def load_and_test_model(model_path: str):
+    """Load and test a quantized model."""
     
-    print(f"Loading {model_type.upper()} quantized model from: {model_path}")
+    print(f"Loading model from: {model_path}")
     
     try:
-        # Load the quantized model and tokenizer
+        # Load the model and tokenizer
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
             torch_dtype="auto",
@@ -51,13 +44,14 @@ def test_quantized_model(model_path: str, model_type: str):
         # Dispatch for generation (important for quantized models)
         dispatch_for_generation(model)
         
-        print(f"Model loaded successfully! Device: {model.device}")
+        print(f"Model loaded successfully!")
+        print(f"Device: {model.device}")
         print(f"Model dtype: {model.dtype}")
         print("=" * 60)
         
-        # Test with various prompts
+        # Test with all prompts
         for i, prompt in enumerate(TEST_PROMPTS, 1):
-            print(f"Test {i}/{len(TEST_PROMPTS)} - {model_type.upper()}")
+            print(f"Test {i}/{len(TEST_PROMPTS)}")
             print(f"Prompt: {prompt}")
             
             try:
@@ -69,11 +63,11 @@ def test_quantized_model(model_path: str, model_type: str):
                     truncation=True,
                 ).input_ids.to(model.device)
                 
-                # Generate response
+                # Generate response with settings similar to original vLLM params
                 with torch.no_grad():
                     output = model.generate(
                         input_ids,
-                        max_new_tokens=128,
+                        max_new_tokens=256,  # Similar to max_tokens in original
                         do_sample=True,
                         temperature=0.7,
                         top_p=0.9,
@@ -95,60 +89,53 @@ def test_quantized_model(model_path: str, model_type: str):
                 print(f"Error during generation: {e}")
             
             print("-" * 40)
-            time.sleep(1)  # Brief pause between generations
+            time.sleep(2)  # Keep the same timing as original
         
-        print(f"{model_type.upper()} model testing completed!")
-        
-        # Clean up memory
-        del model
-        del tokenizer
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        print("Model testing completed!")
         
     except Exception as e:
-        print(f"Error loading {model_type.upper()} model: {e}")
+        print(f"Error loading model: {e}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test quantized models (APoT and PoT)")
-    parser.add_argument(
-        "--model-type", 
-        choices=["apot", "pot", "both"], 
-        default="both",
-        help="Type of model to test (default: both)"
-    )
-    parser.add_argument(
-        "--apot-path", 
-        type=str, 
-        default=DEFAULT_MODELS["apot"],
-        help=f"Path to APoT model (default: {DEFAULT_MODELS['apot']})"
-    )
-    parser.add_argument(
-        "--pot-path", 
-        type=str, 
-        default=DEFAULT_MODELS["pot"],
-        help=f"Path to PoT model (default: {DEFAULT_MODELS['pot']})"
-    )
+    # Test available quantized models
+    available_models = []
     
-    args = parser.parse_args()
+    # Check for APoT model
+    apot_path = "TinyLlama-1.1B-Chat-v1.0-apot-w4a8-t2"
+    if Path(apot_path).exists():
+        available_models.append(("APoT", apot_path))
     
-    # Test APoT model
-    if args.model_type in ["apot", "both"]:
-        if Path(args.apot_path).exists():
-            test_quantized_model(args.apot_path, "apot")
-        else:
-            print(f"APoT model not found at: {args.apot_path}")
-            print("Please run llama_apot_example.py first to create the quantized model.")
+    # Check for PoT model
+    pot_path = "TinyLlama-1.1B-Chat-v1.0-pot-w4a8"
+    if Path(pot_path).exists():
+        available_models.append(("PoT", pot_path))
+    
+    # You can also test with specific model paths
+    # Uncomment and modify these lines to test specific models:
+    # available_models.append(("Custom APoT", "path/to/your/apot/model"))
+    # available_models.append(("Custom PoT", "path/to/your/pot/model"))
+    
+    if not available_models:
+        print("No quantized models found!")
+        print("Available model paths to check:")
+        print(f"  APoT: {apot_path}")
+        print(f"  PoT: {pot_path}")
+        print("\nPlease run the quantization examples first:")
+        print("  python llama_apot_example.py")
+        print("  python llama_pot_example.py")
+        return
+    
+    # Test each available model
+    for model_type, model_path in available_models:
+        print(f"\n{'='*80}")
+        print(f"TESTING {model_type} MODEL")
+        print(f"{'='*80}")
         
-        if args.model_type == "both":
-            print("\n" + "=" * 80 + "\n")
-    
-    # Test PoT model
-    if args.model_type in ["pot", "both"]:
-        if Path(args.pot_path).exists():
-            test_quantized_model(args.pot_path, "pot")
-        else:
-            print(f"PoT model not found at: {args.pot_path}")
-            print("Please run llama_pot_example.py first to create the quantized model.")
+        load_and_test_model(model_path)
+        
+        # Clean up memory between models
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
 
 if __name__ == "__main__":

@@ -118,3 +118,4 @@ This will confirm that POT and APOT now produce different quantization levels an
 4. **Performance benchmarking** to ensure the fixes don't impact speed significantly
 
 The core implementation issue has been resolved - POT and APOT quantization now implement their intended theoretical behaviors and produce distinct, meaningful results.
+

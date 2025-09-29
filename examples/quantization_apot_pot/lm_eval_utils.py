@@ -11,8 +11,6 @@ import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from llmcompressor.utils.dev import dispatch_for_generation
-
 
 def tokenize_batch(
     tokenizer: AutoTokenizer,
@@ -72,7 +70,8 @@ def compute_perplexity_manual(
     batch_size: int,
     device: torch.device,
 ) -> float:
-    dispatch_for_generation(model)
+    if next(model.parameters()).device != device:
+        model.to(device)
     model.eval()
 
     total_nll = 0.0
