@@ -61,6 +61,29 @@ def accumulate_nll(
     return {"nll": float(loss.item()) * tokens, "tokens": tokens}
 
 
+def _resolve_primary_device(
+    model: AutoModelForCausalLM,
+    requested: torch.device,
+) -> torch.device:
+    hf_device_map = getattr(model, "hf_device_map", None)
+    if hf_device_map:
+        for dev in hf_device_map.values():
+            if dev in ("disk", "meta"):
+                continue
+            try:
+                return torch.device(dev)
+            except Exception:
+                continue
+        return requested
+    try:
+        param_device = next(model.parameters()).device
+        if param_device.type != "meta":
+            return param_device
+    except StopIteration:
+        pass
+    return requested
+
+
 def compute_perplexity_manual(
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
@@ -70,8 +93,13 @@ def compute_perplexity_manual(
     batch_size: int,
     device: torch.device,
 ) -> float:
-    if next(model.parameters()).device != device:
-        model.to(device)
+    primary_device = _resolve_primary_device(model, device)
+    if not hasattr(model, "hf_device_map"):
+        try:
+            model.to(primary_device)
+        except RuntimeError as exc:
+            if "offloaded to cpu or disk" not in str(exc):
+                raise
     model.eval()
 
     total_nll = 0.0
@@ -85,7 +113,7 @@ def compute_perplexity_manual(
         batch = tokenize_batch(
             tokenizer,
             pending,
-            device=device,
+            device=primary_device,
             max_seq_length=max_seq_length,
         )
         stats = accumulate_nll(model, batch)

@@ -155,8 +155,9 @@ def _load_model_and_tokenizer(
         model_id,
         torch_dtype=dtype,
         trust_remote_code=trust_remote_code,
-        # device_map={"": device},
+        device_map=None,
     )
+    model.to(device)
     model.eval()
     return model, tokenizer
 

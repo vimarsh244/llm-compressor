@@ -7,6 +7,9 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from llmcompressor.utils.dev import dispatch_for_generation
+from llmcompressor.transformers.compression.quantization_format import (
+    infer_and_set_per_module_quantization_format,
+)
 
 # Test prompts - varied to test different aspects
 TEST_PROMPTS = [
@@ -38,9 +41,31 @@ def load_and_test_model(model_path: str):
         )
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         
+        # Set up tokenizer properly for quantized models
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         
+        # For llama models, disable automatic EOS token addition
+        if hasattr(tokenizer, 'add_eos_token'):
+            tokenizer.add_eos_token = False
+        
+        # Ensure generation config has proper pad/eos ids
+        try:
+            if getattr(model.config, "pad_token_id", None) is None:
+                model.config.pad_token_id = tokenizer.eos_token_id
+            if getattr(model.config, "eos_token_id", None) is None:
+                model.config.eos_token_id = tokenizer.eos_token_id
+            model.generation_config.pad_token_id = tokenizer.eos_token_id
+            model.generation_config.eos_token_id = tokenizer.eos_token_id
+        except Exception:
+            pass
+
+        # Important: set per-module quantization format for compressed-tensors
+        try:
+            infer_and_set_per_module_quantization_format(model, save_compressed=False)
+        except Exception:
+            pass
+
         # Dispatch for generation (important for quantized models)
         dispatch_for_generation(model)
         
@@ -55,33 +80,73 @@ def load_and_test_model(model_path: str):
             print(f"Prompt: {prompt}")
             
             try:
-                # Tokenize input
-                input_ids = tokenizer(
+                # Tokenize input with proper attention mask handling
+                inputs = tokenizer(
                     prompt,
                     return_tensors="pt",
-                    padding=True,
+                    padding=False,  # Avoid padding for single inputs
                     truncation=True,
-                ).input_ids.to(model.device)
+                    max_length=512,
+                )
                 
-                # Generate response with settings similar to original vLLM params
+                input_ids = inputs.input_ids.to(model.device)
+                attention_mask = inputs.attention_mask.to(model.device) if 'attention_mask' in inputs else None
+                
+                # Use the same generation scheme as example scripts
+                generation_kwargs = {
+                    "input_ids": input_ids,
+                    "max_new_tokens": 128,
+                    "do_sample": True,
+                    "temperature": 0.7,
+                    "top_p": 0.9,
+                    "pad_token_id": tokenizer.eos_token_id,
+                    "eos_token_id": tokenizer.eos_token_id,
+                    "use_cache": True,
+                }
+                
+                # Add attention mask if available and meaningful
+                if attention_mask is not None:
+                    generation_kwargs["attention_mask"] = attention_mask
+
+                # Do not add additional constraints; mirror example behavior closely
+                
+                # Generate response with error handling
                 with torch.no_grad():
-                    output = model.generate(
-                        input_ids,
-                        max_new_tokens=256,  # Similar to max_tokens in original
-                        do_sample=True,
-                        temperature=0.7,
-                        top_p=0.9,
-                        pad_token_id=tokenizer.eos_token_id,
+                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                    
+                    try:
+                        output = model.generate(**generation_kwargs)
+                    except RuntimeError as cuda_error:
+                        if "CUDA" in str(cuda_error):
+                            print(f"    CUDA error, trying fallback generation...")
+                            # Fallback with minimal settings
+                            fallback_kwargs = {
+                                "input_ids": input_ids,
+                                "max_new_tokens": 50,
+                                "do_sample": False,
+                                "pad_token_id": tokenizer.eos_token_id,
+                            }
+                            output = model.generate(**fallback_kwargs)
+                        else:
+                            raise cuda_error
+                
+                # Decode only the newly generated tokens
+                gen_ids = output[0][input_ids.shape[1]:]
+                generated_part = tokenizer.decode(
+                    gen_ids,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=False,
+                )
+                
+                if not generated_part or generated_part.strip() == "":
+                    alt = tokenizer.decode(
+                        gen_ids,
+                        skip_special_tokens=False,
+                        clean_up_tokenization_spaces=False,
                     )
-                
-                # Decode generated text
-                generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
-                
-                # Extract only the generated part (remove the input prompt)
-                if generated_text.startswith(prompt):
-                    generated_part = generated_text[len(prompt):].strip()
-                else:
-                    generated_part = generated_text
+                    generated_part = alt if alt else "[No text generated]"
+
+                # If generation is mostly <unk>, do not force suppression; keep original behavior
                 
                 print(f"Generated: {generated_part}")
                 
