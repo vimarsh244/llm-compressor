@@ -15,18 +15,32 @@ Additive Power-of-Two (APoT) quantization represents values as sums of multiple 
 
 ## Examples
 
-### Basic APoT Quantization
+### Script With Calibration
 
 ```bash
 python llama_apot_example.py
 ```
 
-This example demonstrates:
-- Loading a LLaMA model
-- Applying 4-bit APoT quantization with 2 terms to weights
-- Applying 8-bit APoT quantization to activations
-- Testing the quantized model
-- Saving the compressed model
+This example now downloads the Open-Platypus dataset, runs calibration through the
+sequential pipeline, saves the quantized checkpoint, and verifies the output with vLLM.
+
+### Weight-Only Quantization
+
+```bash
+python quantize_weights_only.py \
+  TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
+  TinyLlama-1.1B-Chat-v1.0-apot-w4-weight-only \
+  --kind apot --weight-bits 4 --apot-terms 2
+
+```
+
+Because APoT uses activation observers, the script explicitly requests the
+`datafree` pipeline when calling `oneshot`. This prevents the sequential pipeline
+from attempting to iterate over missing calibration data.
+```
+
+The weight-only utility skips calibration entirely and still produces a compressed
+checkpoint ready for vLLM inference.
 
 ## Configuration Options
 

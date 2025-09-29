@@ -108,6 +108,3 @@ print("\n" + "="*50)
 print("TESTING QUANTIZED MODEL GENERATION")
 print("="*50)
 
-from vllm import LLM
-model = LLM("TinyLlama-1.1B-Chat-v1.0-pot-w8a8", device_map=device_map)
-output = model.generate("The python code to generate first 1000 digits of pi is: ```")
