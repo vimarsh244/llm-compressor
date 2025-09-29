@@ -8,6 +8,7 @@ import math
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import torch
+import torch.nn.functional as F
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -40,6 +41,7 @@ def accumulate_nll(
     model: AutoModelForCausalLM,
     batch: Dict[str, torch.Tensor],
 ) -> Dict[str, float]:
+    # Validate vocabulary alignment to fail fast on tokenizer/model mismatch
     labels = batch.get("labels")
     if labels is not None:
         valid = labels[labels >= 0]
@@ -53,35 +55,50 @@ def accumulate_nll(
                 )
 
     with torch.no_grad():
-        outputs = model(**batch)
-        loss = outputs.loss
-    if torch.isnan(loss) or torch.isinf(loss):
+        # Avoid relying on model.loss; do a forward pass and compute CE manually
+        model_inputs = {k: v for k, v in batch.items() if k != "labels"}
+        outputs = model(**model_inputs)
+        logits = outputs.logits  # (B, T, V)
+
+    if logits is None:
         return {"nll": float("nan"), "tokens": 0}
-    tokens = int((batch["labels"] != -100).sum().item())
-    return {"nll": float(loss.item()) * tokens, "tokens": tokens}
 
+    input_ids = batch["input_ids"]
+    attention_mask = batch.get("attention_mask")
 
-def _resolve_primary_device(
-    model: AutoModelForCausalLM,
-    requested: torch.device,
-) -> torch.device:
-    hf_device_map = getattr(model, "hf_device_map", None)
-    if hf_device_map:
-        for dev in hf_device_map.values():
-            if dev in ("disk", "meta"):
-                continue
-            try:
-                return torch.device(dev)
-            except Exception:
-                continue
-        return requested
-    try:
-        param_device = next(model.parameters()).device
-        if param_device.type != "meta":
-            return param_device
-    except StopIteration:
-        pass
-    return requested
+    # Shift to compute next-token prediction: p(x_t | x_{<t})
+    # Use float32 for stability
+    logits = logits[:, :-1, :].float()  # (B, T-1, V)
+    targets = input_ids[:, 1:]  # (B, T-1)
+
+    if attention_mask is not None:
+        token_mask = attention_mask[:, 1:].to(torch.bool)  # (B, T-1)
+    else:
+        token_mask = torch.ones_like(targets, dtype=torch.bool, device=targets.device)
+
+    # Compute log-probs and gather the ones for targets
+    log_probs = F.log_softmax(logits, dim=-1)
+    # Flatten for efficient gather
+    B, Tm1, V = log_probs.shape
+    log_probs_flat = log_probs.view(B * Tm1, V)
+    targets_flat = targets.contiguous().view(B * Tm1)
+
+    # Mask out positions corresponding to padding
+    token_mask_flat = token_mask.view(B * Tm1)
+    if token_mask_flat.sum() == 0:
+        return {"nll": 0.0, "tokens": 0}
+
+    selected_log_probs = log_probs_flat[token_mask_flat].gather(
+        dim=-1, index=targets_flat[token_mask_flat].unsqueeze(-1)
+    ).squeeze(-1)  # (N_valid,)
+
+    if torch.isnan(selected_log_probs).any() or torch.isinf(selected_log_probs).any():
+        # Skip this batch if numerically unstable
+        return {"nll": float("nan"), "tokens": 0}
+
+    nll = -selected_log_probs.sum().item()
+    tokens = int(token_mask_flat.sum().item())
+    return {"nll": float(nll), "tokens": tokens}
 
 
 def compute_perplexity_manual(
@@ -93,13 +110,7 @@ def compute_perplexity_manual(
     batch_size: int,
     device: torch.device,
 ) -> float:
-    primary_device = _resolve_primary_device(model, device)
-    if not hasattr(model, "hf_device_map"):
-        try:
-            model.to(primary_device)
-        except RuntimeError as exc:
-            if "offloaded to cpu or disk" not in str(exc):
-                raise
+    # Don't move model to device - it may already be dispatched with accelerate hooks
     model.eval()
 
     total_nll = 0.0
@@ -113,7 +124,7 @@ def compute_perplexity_manual(
         batch = tokenize_batch(
             tokenizer,
             pending,
-            device=primary_device,
+            device=next(model.parameters()).device,
             max_seq_length=max_seq_length,
         )
         stats = accumulate_nll(model, batch)

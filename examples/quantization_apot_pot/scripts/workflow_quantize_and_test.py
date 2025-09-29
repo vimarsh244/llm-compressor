@@ -60,7 +60,7 @@ def main():
     # Step 1: Create APoT model if it doesn't exist
     if not apot_exists:
         success = run_command(
-            "python llama_apot_example.py",
+            "python scripts/llama_apot_example.py",
             "Creating APoT quantized model"
         )
         if not success:
@@ -73,7 +73,7 @@ def main():
     # Step 2: Create PoT model if it doesn't exist
     if not pot_exists:
         success = run_command(
-            "python llama_pot_example.py",
+            "python scripts/llama_pot_example.py",
             "Creating PoT quantized model"
         )
         if not success:
@@ -91,7 +91,7 @@ def main():
     # Test APoT model
     if check_model_exists(apot_model_path):
         run_command(
-            "python test_apot_model.py",
+            "python tests/test_apot_model.py",
             "Testing APoT model"
         )
         time.sleep(2)
@@ -99,21 +99,21 @@ def main():
     # Test PoT model
     if check_model_exists(pot_model_path):
         run_command(
-            "python test_pot_model.py", 
+            "python tests/test_pot_model.py", 
             "Testing PoT model"
         )
         time.sleep(2)
     
     # Step 4: Run combined test
     run_command(
-        "python test_quantized_models.py --model-type both",
+        "python tests/test_quantized_models.py --model-type both",
         "Running combined test for both models"
     )
     time.sleep(2)
     
     # Step 5: Run benchmark comparison
     run_command(
-        "python benchmark_quantized_models.py",
+        "python tests/benchmark_quantized.py",
         "Running performance benchmark comparison"
     )
     
