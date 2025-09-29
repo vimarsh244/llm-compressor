@@ -1,9 +1,10 @@
-"""Utility to perform weight-only quantization without calibration data."""
+"""Fixed version of weight-only quantization for PoT/APoT with workarounds."""
 
 import argparse
 from pathlib import Path
+import warnings
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from compressed_tensors.quantization import QuantizationArgs, QuantizationScheme
 
 from llmcompressor import oneshot
@@ -49,7 +50,18 @@ def quantize_weight_only(
     weight_bits: int = 4,
     apot_terms: int | None = None,
 ):
+    # Add warning about current limitations
+    warnings.warn(
+        f"WARNING: {kind.upper()} quantization is experimental and may not work correctly "
+        "with compressed_tensors format during inference. The quantized model may produce "
+        "incorrect outputs. This is a known issue that requires deeper integration with "
+        "the compressed_tensors library.",
+        UserWarning
+    )
+    
     modifier = build_weight_only_modifier(kind, weight_bits, apot_terms)
+    
+    # Perform quantization
     quantized_model = oneshot(
         model=model_id,
         recipe=modifier,
@@ -60,13 +72,28 @@ def quantize_weight_only(
         quantization_aware_calibration=False,
     )
 
-    infer_and_set_per_module_quantization_format(
-        quantized_model, save_compressed=True
-    )
-
+    # For now, save without compression to avoid inference issues
+    # TODO: Once PoT/APoT are properly integrated with compressed_tensors,
+    # re-enable save_compressed=True
+    print(f"\nNOTE: Saving model without compression due to {kind.upper()} compatibility issues.")
+    print("The model weights are quantized but stored in FP16/FP32 format.")
+    print("Full compression support for PoT/APoT is under development.\n")
+    
+    # Don't use compressed format for now
+    # infer_and_set_per_module_quantization_format(
+    #     quantized_model, save_compressed=True
+    # )
+    
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     tokenizer.save_pretrained(output_dir)
-    quantized_model.save_pretrained(output_dir, save_compressed=True)
+    
+    # Save without compression
+    quantized_model.save_pretrained(output_dir, save_compressed=False)
+    
+    print(f"Model saved to {output_dir}")
+    print("\nTo test the model, use:")
+    print(f"  model = AutoModelForCausalLM.from_pretrained('{output_dir}')")
+    print(f"  tokenizer = AutoTokenizer.from_pretrained('{output_dir}')")
 
 
 def parse_args():
@@ -93,4 +120,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
